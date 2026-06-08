@@ -5,8 +5,8 @@
         "matcher": "startup|resume",
         "hooks": [{
           "type": "command",
-          "command": "/bin/bash -c 'cat \"$PWD/.superflow-state.json\" 2>/dev/null || echo \"{}\"'",
-          "statusMessage": "Loading Superflow state"
+          "command": "/bin/bash -lc 'for p in \"$HOME/.codex/skills/superflow/hooks/codex-session-start-recovery.sh\" \"$HOME/.claude/skills/superflow/hooks/codex-session-start-recovery.sh\" \"$HOME/.agents/skills/superflow/hooks/codex-session-start-recovery.sh\"; do [ -f \"$p\" ] && exec /bin/bash \"$p\"; done'",
+          "statusMessage": "Loading Superflow recovery bundle"
         }]
       }
     ],
