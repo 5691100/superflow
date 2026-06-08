@@ -43,11 +43,11 @@ Sprint complexity tag in the plan drives implementer tier:
 
 | Complexity | Agent | Model | Effort | When |
 |-----------|-------|-------|--------|------|
-| simple | fast-implementer | sonnet | low | 1-2 files, CRUD/template, <50 lines |
-| medium | standard-implementer | sonnet | medium | 2-5 files, some new logic. Default if untagged. |
-| complex | deep-implementer | sonnet | high | 5+ files, new architecture, security-sensitive |
+| simple | fast-implementer | opus | low | 1-2 files, CRUD/template, <50 lines |
+| medium | standard-implementer | opus | medium | 2-5 files, some new logic. Default if untagged. |
+| complex | deep-implementer | opus | high | 5+ files, new architecture, security-sensitive |
 
-**ALWAYS pass `model: "sonnet"` explicitly** in Agent() calls for implementers and doc-writers.
+**ALWAYS pass `model: "opus"` explicitly** in Agent() calls for implementers and doc-writers.
 Agent definition frontmatter `model:` is NOT reliably inherited — without it, subagents inherit
 the parent's model (Opus), wasting tokens on tasks Sonnet handles equally well.
 

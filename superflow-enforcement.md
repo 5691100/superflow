@@ -54,13 +54,13 @@ See `references/codex-dispatch-patterns.md` for the complete dispatch mapping.
 
 | Tier | Claude Agent (subagent_type) | Codex | When |
 |------|-------------------------------|-------|------|
-| **deep** | `deep-spec-reviewer`, `deep-code-reviewer`, `deep-product-reviewer`, `deep-analyst`, `deep-doc-writer` (opus, effort: high); `deep-implementer` (sonnet, effort: high) | `-m gpt-5.5 -c model_reasoning_effort=high` + `prompts/codex/` | Phase 0 audit+security, Phase 1 spec review, Phase 2 final holistic, llms.txt/CLAUDE.md generation |
-| **standard** | `standard-spec-reviewer`, `standard-code-reviewer`, `standard-product-reviewer`, `standard-doc-writer` (opus, effort: medium); `standard-implementer` (sonnet, effort: medium) | `-m gpt-5.5 -c model_reasoning_effort=high` + `prompts/codex/` | Phase 1 plan review, Phase 2 unified review, Phase 3 doc updates |
-| **fast** | `fast-implementer` (sonnet, effort: low) | `-m gpt-5.5 -c model_reasoning_effort=medium` | Simple implementation tasks |
+| **deep** | `deep-spec-reviewer`, `deep-code-reviewer`, `deep-product-reviewer`, `deep-analyst`, `deep-doc-writer` (opus, effort: high); `deep-implementer` (opus, effort: high) | `-m gpt-5.5 -c model_reasoning_effort=high` + `prompts/codex/` | Phase 0 audit+security, Phase 1 spec review, Phase 2 final holistic, llms.txt/CLAUDE.md generation |
+| **standard** | `standard-spec-reviewer`, `standard-code-reviewer`, `standard-product-reviewer`, `standard-doc-writer` (opus, effort: medium); `standard-implementer` (opus, effort: medium) | `-m gpt-5.5 -c model_reasoning_effort=high` + `prompts/codex/` | Phase 1 plan review, Phase 2 unified review, Phase 3 doc updates |
+| **fast** | `fast-implementer` (opus, effort: low) | `-m gpt-5.5 -c model_reasoning_effort=medium` | Simple implementation tasks |
 
 Agent definitions with effort frontmatter are deployed to `~/.claude/agents/` during SKILL.md startup (step 3). Agent() does NOT accept inline `effort` — controlled via agent definition files only.
 
-**CRITICAL: Always pass `model:` explicitly in every Agent() call.** Frontmatter `model:` in agent definitions is NOT reliably inherited — without explicit `model:`, subagents inherit the parent's model (Opus), burning expensive tokens on implementation tasks. Rule: implementers and doc-writers → `model: "sonnet"`, reviewers and analysts → `model: "opus"`.
+**CRITICAL: Always pass `model:` explicitly in every Agent() call.** Frontmatter `model:` in agent definitions is NOT reliably inherited — without explicit `model:`, subagents inherit the parent's model, burning expensive tokens on implementation tasks. Rule (owner directive 2026-06-06): **ALL agents → `model: "opus"`** (plain opus) — implementers, fixers, reviewers, analysts, doc-writers alike. The earlier sonnet-for-implementers / `claude-opus-4-6` guidance is SUPERSEDED.
 
 ## Test & Process Discipline
 

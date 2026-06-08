@@ -39,7 +39,7 @@ Each parallel sprint agent runs the FULL 6-stage Per-Sprint Flow independently:
 ```
 Agent(
   subagent_type: "standard-implementer",
-  model: "sonnet",  # ALWAYS explicit
+  model: "opus",  # ALWAYS explicit
   run_in_background: true,
   prompt: "Execute Sprint N: [title] — full Per-Sprint Flow. ..."
 )
@@ -54,11 +54,11 @@ Sprint complexity tag in the plan drives implementer tier:
 
 | Complexity | Agent | Model | Effort | When |
 |-----------|-------|-------|--------|------|
-| simple | fast-implementer | sonnet | low | 1-2 files, CRUD/template, <50 lines |
-| medium | standard-implementer | sonnet | medium | 2-5 files, some new logic. Default if untagged. |
-| complex | deep-implementer | sonnet | high | 5+ files, new architecture, security-sensitive |
+| simple | fast-implementer | opus | low | 1-2 files, CRUD/template, <50 lines |
+| medium | standard-implementer | opus | medium | 2-5 files, some new logic. Default if untagged. |
+| complex | deep-implementer | opus | high | 5+ files, new architecture, security-sensitive |
 
-**ALWAYS pass `model: "sonnet"` explicitly** — frontmatter `model:` is NOT reliably inherited.
+**ALWAYS pass `model: "opus"` explicitly** — frontmatter `model:` is NOT reliably inherited.
 Without it, subagents inherit the parent's model (Opus), wasting tokens.
 
 Include `llms.txt` content in agent context (if file exists).

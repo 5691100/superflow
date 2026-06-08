@@ -1,7 +1,7 @@
 ---
 name: fast-implementer
 description: "Fast implementation agent for simple/mechanical tasks (CRUD, config, file moves)"
-model: sonnet
+model: opus
 effort: low
 ---
 
