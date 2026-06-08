@@ -38,7 +38,8 @@ SKILL.md (entry point, ~240 lines, auto-detects Claude/Codex runtime)
   │   │   ├── workflow.json (DAG: 9-cell governance×complexity decision matrix + 7 stages + step_files map)
   │   │   ├── overview.md (Phase 2 high-level context, wave analysis, model selection)
   │   │   └── steps/ (10 step detail files: setup-reread, setup-worktree, impl-dispatch, review-unified, par-evidence, ship-pr, compaction-recovery, holistic-review, frontend-testing, completion-report)
-  │   └── phase3-merge.md (user-initiated merge, 3 stages)
+  │   ├── phase3-merge.md (user-initiated merge, 3 stages)
+  │   └── contract-gate.md (Rule 3a Contract Gate — contract-first criteria, browser/artifact evaluator lenses)
   ├── prompts/
   │   ├── implementer.md (TDD code agent)
   │   ├── expert-panel.md (expert persona prompt for brainstorming)
@@ -50,9 +51,10 @@ SKILL.md (entry point, ~240 lines, auto-detects Claude/Codex runtime)
   │   ├── testing-guidelines.md (TDD reference)
   │   ├── security-audit.md (Claude security fallback for Phase 0)
   │   └── codex/ (Codex-specific prompts: code-reviewer, product-reviewer, audit)
-  ├── agents/ (12 agent definitions — deep/standard/fast tiers with effort frontmatter)
+  ├── agents/ (12 agent definitions — deep/standard/fast tiers; all model: opus, differ by effort)
   ├── templates/
   │   ├── superflow-state-schema.json (state file JSON Schema)
+  │   ├── contract-template.yml (sprint contract template — checkable criteria + evidence channel)
   │   ├── greenfield/ (stack scaffolding: nextjs.md, python.md, generic.md)
   │   └── ci/ (CI workflows: github-actions-node.yml, github-actions-python.yml)
 ```
@@ -67,7 +69,8 @@ SKILL.md (entry point, ~240 lines, auto-detects Claude/Codex runtime)
 | File | Purpose |
 |------|---------|
 | `SKILL.md` | Entry point — startup checklist, provider detection, state management, phase routing |
-| `superflow-enforcement.md` | 13 hard rules, specialized 2-agent reviews, rationalization prevention, phase gates |
+| `superflow-enforcement.md` | 13 hard rules + Rule 3a (Contract Gate), specialized 2-agent reviews, rationalization prevention, phase gates |
+| `references/contract-gate.md` | Contract Gate how-to — negotiation loop, criterion format, browser/artifact evidence channels, PAR consumption |
 | `references/phase0-onboarding.md` | Router — detection, recovery matrix, stage loading |
 | `references/phase0/stage1-detect.md` | Parallel preflight, auto-detection, confirmation |
 | `references/phase0/stage2-analysis.md` | 5 parallel agents, tiered model usage |
@@ -106,6 +109,7 @@ SKILL.md (entry point, ~240 lines, auto-detects Claude/Codex runtime)
 - **Event emission**: `source tools/sf-emit.sh && sf_emit <type> key=val key:int=N key:bool=true key:json='{"x":1}'`. Typed key syntax: bare `=` → string, `:int=` → number, `:bool=` → boolean, `:json=` → raw JSON. jq-only construction; validates type against allowlist and key names against identifier regex before emitting one compact JSONL line.
 - **Codex model policy**: Codex subagents and Claude-runtime `codex exec` secondary calls use `gpt-5.5`; deep analyst/implementer/reviewer roles use `xhigh`, standard roles use `high`, and fast implementer uses `medium`. Codex-runtime Claude product/research secondary calls use exact model `claude-opus-4-7` with `--effort xhigh`.
 - **Per-PR docs gate**: every PR must run documentation update and separate documentation review before `gh pr create`. In per-sprint PR modes this happens every sprint; in `solo_single_pr` it happens before the final PR. `.par-evidence.json` must include `docs_update` (`UPDATED` or `UNCHANGED`) and `docs_review: PASS`; `llms.txt` is explicitly audited for every PR.
+- **Contract Gate (Rule 3a)**: each Phase 2 sprint opens with an agreed `docs/superflow/contracts/<date>-<feature>.contract.yml` (checkable criteria) BEFORE code; the evaluator confirms sufficiency, then Unified Review verifies it criterion-by-criterion (`.par-evidence.json` gains a `criteria` PASS/FAIL table). UI sprints add a Playwright browser pass; artifact sprints (steel/workbook) open & reconcile every produced file. Template `templates/contract-template.yml`, how-to `references/contract-gate.md`. Adapts the planner→agent→evaluator / contract-first scheme.
 
 ## Known Issues & Tech Debt
 - Permissions JSON: single-sourced in `references/phase0/stage4-setup.md` (Branch B); `README.md` has a short example with a link to the canonical source
@@ -115,4 +119,4 @@ SKILL.md (entry point, ~240 lines, auto-detects Claude/Codex runtime)
 - **Codex no PreCompact/PostCompact**: compaction recovery relies on Stop hook dumps + SessionStart re-injection + self-referential rule in AGENTS.md. Less reliable than Claude's hook-based recovery.
 - **Codex context ~258K**: 4x smaller than Claude's 1M. Long Phase 2 runs (4+ sprints) require session-per-wave/session-per-sprint strategy or aggressive /compact usage.
 - **Per-event-type key allowlist**: `sf_emit` validates key names against an identifier regex and the event type against a global allowlist, but does not yet validate which keys are legal per event type. Practical injection is blocked; semantic key validation deferred to a future sprint.
-<!-- updated-by-superflow:2026-04-26 -->
+<!-- updated-by-superflow:2026-06-08 -->
