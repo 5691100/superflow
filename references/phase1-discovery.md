@@ -507,6 +507,8 @@ If the spec includes a "Tech Debt Resolution" section, allocate a dedicated spri
 
 Break into sprints (independently deployable), 3-8 tasks each, each task 2-5 min. Include: files, steps, commit message.
 
+**Planner altitude (anti-cascade).** Fix product goal, sprint boundaries, invariants, risk areas, acceptance themes, git/governance. Do NOT pre-decide file order or exact functions for *future* sprints — a wrong 200-step plan cascades errors through hours of work. Write detailed task-level steps only for the **next** sprint/wave; later sprints stay outcome-level (`files:` + `depends_on:` + known risks). Per-sprint detail becomes the just-in-time **contract** (Rule 3a in `superflow-enforcement.md`), written in Phase 2 after the worktree + baseline exist, so it reflects the actual post-previous-sprint state rather than a stale early guess.
+
 Read `context.git_workflow_mode` from `.superflow-state.json` and shape the plan for that mode:
 - `solo_single_pr`: keep sprint boundaries as internal checkpoints; estimated PR count is 1.
 - `sprint_pr_queue`: each sprint must be independently reviewable and mergeable into `main`.

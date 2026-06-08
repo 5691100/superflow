@@ -1,0 +1,56 @@
+# ──────────────────────────────────────────────────────────────────────────────
+# Superflow Sprint Contract — the agreed, CHECKABLE definition of done.
+#
+# Negotiated between the implementer-subagent and the evaluator BEFORE any code is
+# written (Contract Gate, Phase 2). The evaluator confirms the criteria are
+# sufficient (product scenarios + edge cases + interface states + regression),
+# THEN implementation starts. Unified Review verifies THIS contract,
+# criterion-by-criterion — not the raw, fuzzy user request.
+#
+# Why: a vague critique ("как-то не очень") gives the implementer nothing to fix.
+# A concrete criterion ("card 146/2026 renders 5 physics tiles, no € anywhere")
+# points at the exact problem. PAR stops being one verdict and becomes a table.
+#
+# Keep it to the right altitude: ONE sprint's worth of assertions (≈5–12 typical,
+# not 200). Write it just-in-time, after the worktree + baseline exist, so it
+# reflects reality, not a stale early plan.
+# ──────────────────────────────────────────────────────────────────────────────
+sprint: <N>
+feature: <slug>
+project: <name>
+date: <YYYY-MM-DD>
+governance_mode: light            # light | standard | critical
+spec_ref: <path to spec/plan that this contract makes checkable>
+
+scope:
+  in:
+    - <what this sprint delivers>
+  out:                            # explicit non-goals — guards scope creep AND false FAILs
+    - <what this sprint deliberately does NOT touch>
+
+invariants:                       # must STAY true — regression guards, owner directives
+  - <e.g. money is never rendered on the RFQ card>
+  - <e.g. live rfq-registry count stays ~2069 after the test suite>
+
+criteria:
+  - id: C01
+    type: product                 # product | data | regression | security | ux
+    assertion: "<concrete, checkable statement of done>"
+    evidence: browser             # browser | test | api | artifact | cli
+    verify: "<exact command / click-path / query that confirms it>"
+    status: PENDING               # PENDING | PASS | FAIL  (filled by evaluator)
+    note: ""
+
+# Which evaluator lenses this sprint needs (don't over-provision):
+review_required:
+  product: true
+  technical: true
+  browser: false                  # true for UI sprints (Playwright clicks the live app)
+  artifact: false                 # true for steel/workbook sprints (open & reconcile every file)
+
+# Filled at gate open + close (the contract's own PAR record):
+gate:
+  contract_agreed: false          # evaluator confirmed criteria are SUFFICIENT, before build
+  agreed_ts: ""
+  all_pass: false                 # every criterion PASS after build
+  closed_ts: ""
