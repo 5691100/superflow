@@ -55,6 +55,7 @@ Final pre-Phase-3 evidence (after release gate runs — `release_gate` required)
   "docs_update": "UPDATED",
   "docs_review": "PASS",
   "provider": "codex",
+  "criteria": {"C01": "PASS", "C02": "PASS", "C03": "PASS"},
   "release_gate": "PASS",
   "ts": "2026-01-01T00:00:00Z"
 }
@@ -73,9 +74,13 @@ Light governance sprint example (`par_skip_product: true`):
   "docs_update": "UNCHANGED",
   "docs_review": "PASS",
   "provider": "split-focus",
+  "criteria": {"C01": "PASS"},
   "ts": "2026-01-01T00:00:00Z"
 }
 ```
+
+Even a light-mode sprint carries its contract's criteria — a single-criterion contract still
+records that one entry (`criteria` is never empty; Rule 3a).
 
 `claude_product: "SKIPPED"` is ONLY valid when `par_skip_product: true` AND `governance: "light"`.
 For standard or critical sprints, regardless of complexity, `claude_product` MUST be `"ACCEPTED"`.
@@ -95,7 +100,18 @@ extract_verdict() {  # $1 = file holding the reviewer's final message
 PRODUCT=$(extract_verdict product-review.txt)   # use "SKIPPED" when par_skip_product+light
 TECH=$(extract_verdict technical-review.txt)
 # CRITERIA_JSON — per-criterion PASS/FAIL table built from the contract verification (Rule 3a),
-# e.g. '{"C01":"PASS","C02":"PASS"}'. Assembled from the reviewers' criterion checks.
+# e.g. '{"C01":"PASS","C02":"PASS"}'. Assembled from the reviewers' criterion checks. MUST be
+# non-empty for EVERY sprint (standard, critical, AND light — a light-mode single-criterion
+# contract still carries its one entry). An empty table means the contract was not verified.
+
+# Rule 3a guard: refuse to assemble evidence with an empty criteria table.
+# (The -z check short-circuits before jq, so CRITERIA_JSON is guaranteed non-empty here.)
+if [ -z "${CRITERIA_JSON:-}" ] || \
+   [ "$(jq -n --argjson c "$CRITERIA_JSON" '$c | length')" -eq 0 ]; then
+  echo "FATAL: criteria table is empty — Rule 3a requires a per-criterion PASS/FAIL table" \
+       "from the sprint contract (light-mode single-criterion contracts included)." >&2
+  exit 1
+fi
 
 jq -n \
   --argjson sprint "$SPRINT_NUM" \
@@ -107,7 +123,7 @@ jq -n \
   --arg docs_update "$DOCS_UPDATE" \
   --arg docs_review "$DOCS_REVIEW" \
   --arg provider "$PROVIDER" \
-  --argjson criteria "${CRITERIA_JSON:-{}}" \
+  --argjson criteria "$CRITERIA_JSON" \
   '{sprint: $sprint, governance: $governance, complexity: $complexity,
     par_skip_product: $skip, claude_product: $product, technical_review: $tech,
     docs_update: $docs_update, docs_review: $docs_review, provider: $provider,

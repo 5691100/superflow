@@ -69,9 +69,9 @@ Record `"provider": "split-focus"` in .par-evidence.json.
 |-------------|-------------|---------------|-------------|-----------------|
 | deep | claude-opus-4-8 | xhigh | gpt-5.5 | xhigh |
 | standard | claude-opus-4-8 | xhigh | gpt-5.5 | high |
-| fast | sonnet | low | gpt-5.5 | medium |
-| implementer (deep) | sonnet | max | gpt-5.5 | xhigh |
-| implementer (std) | sonnet | high | gpt-5.5 | high |
-| implementer (fast) | sonnet | low | gpt-5.5 | medium |
+| fast | claude-opus-4-8 | low | gpt-5.5 | medium |
+| implementer (deep) | claude-opus-4-8 | max | gpt-5.5 | xhigh |
+| implementer (std) | claude-opus-4-8 | high | gpt-5.5 | high |
+| implementer (fast) | claude-opus-4-8 | low | gpt-5.5 | medium |
 
 > **Model note:** Fable access is blocked, so every Claude secondary (deep and standard product/review lens) runs on `claude-opus-4-8` at `xhigh` effort. There is no model-profile selection — depth is differentiated by effort.

@@ -4,8 +4,10 @@
 Completion Report and Phase 3. Not a per-sprint stage.
 
 **Purpose:** Boot the assembled app, run integration + headless E2E autonomously, compute a
-persisted verdict. Phase 3 refuses merge unless `.superflow/release-gate/verdict.json` holds
-`verdict=PASS` (or `verdict=SKIPPED` for library projects).
+persisted verdict. **Binding per enforcement Rule 14** (infra + charter `test_strategy` +
+existing test suite all present): then Phase 3 refuses merge unless
+`.superflow/release-gate/verdict.json` holds `verdict=PASS` (or `verdict=SKIPPED` for library
+projects). **Advisory otherwise** — record the verdict, do not block Phase 3.
 
 **Reference:** `phase_gates.release_gate` in `references/phase2/workflow.json`.
 
@@ -17,7 +19,7 @@ This gate is the **receiving end** of the Phase 1 test strategy:
 
 1. **Phase 1** assigned each journey a `spec_tag` and `owning_sprint` (see `references/phase1-discovery.md` Step 13a).
 2. **Each owning sprint** authored the executable spec at `spec_path`, annotating the test with `spec_tag` (e.g. `@J1-login`). No other sprint authors that spec.
-3. **This gate (Step 8)** reads the charter's `test_strategy.journeys`, emits `journeys.json` keyed by `spec_tag`, runs Playwright, and checks that every journey appears in the covered (green) set.
+3. **This gate (Step 8)** reads the charter's `test_strategy.journeys`, emits `journeys.json` as a JSON array of journey objects (each carrying a unique `spec_tag`), runs Playwright, and checks that every journey appears in the covered (green) set.
 
 **Who authors what:** the owning sprint's implementer writes the spec. The gate only verifies it ran green. Ambiguity → fail fast (FAIL verdict surfaces the missing journey `spec_tag`).
 
@@ -389,7 +391,7 @@ VERDICT=$(jq -r '.verdict' .superflow/release-gate/verdict.json)
 |---|---|
 | `PASS` | Proceed to Completion Report, then Phase 3. |
 | `SKIPPED` | Project is a library; coverage threshold is the gate. Proceed to Completion Report. |
-| `FAIL` | **STOP.** Surface `reason`, `journeys_missing`, and trace/screenshot artefacts. Fix the failing journeys or integration tests in the current branch, then re-run the gate (Steps 4–9). Do NOT proceed to Phase 3 with a FAIL verdict. |
+| `FAIL` | Surface `reason`, `journeys_missing`, and trace/screenshot artefacts. **When the gate is binding (enforcement Rule 14 — infra + charter `test_strategy` + existing test suite all present): STOP** — fix the failing journeys or integration tests in the current branch, then re-run the gate (Steps 4–9); do NOT proceed to Phase 3 with a FAIL verdict (no vacuous pass). **Advisory otherwise:** record the FAIL verdict; do not hard-block Phase 3 — the sprint contract's browser/artifact evaluator pass remains the binding gate. |
 
 ---
 

@@ -93,6 +93,9 @@ superflow/
      done
      export SUPERFLOW_SKILL_ROOT
    fi
+   # Re-detect RUNTIME — env vars do not persist between Bash calls, so this self-contained
+   # block must resolve it locally before branching on it below.
+   [ -z "${RUNTIME:-}" ] && { [ -n "$CLAUDE_CODE_SESSION_ID" ] && RUNTIME=claude || RUNTIME=codex; }
    # All detection in one command — secondary provider detection
    if [ "$RUNTIME" = "codex" ]; then
      # Codex is primary → detect Claude as secondary
@@ -131,8 +134,8 @@ superflow/
        sf_sync "$f" ~/.claude/workflows/"$(basename "$f")"
      done
    fi
-   # Run ID — stable identifier for state recovery after /clear (NOT event telemetry; the event
-   # stack was removed in v5.4.0). Restore from state or generate; lowercase-normalized. No emit calls.
+   # Run ID — stable identifier for state recovery after /clear.
+   # Restore from state or generate; lowercase-normalized.
    if [ -z "${SUPERFLOW_RUN_ID:-}" ]; then
      SUPERFLOW_RUN_ID=$(jq -r '.context.run_id // empty' .superflow-state.json 2>/dev/null || true)
      if [ -z "$SUPERFLOW_RUN_ID" ]; then

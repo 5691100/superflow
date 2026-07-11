@@ -560,7 +560,7 @@ Use `project_type` and the readiness flags to determine which levels apply and w
 **Journeys → scenarios handoff chain:**
 1. **Phase 1 (here):** each journey gets a stable `spec_tag` (e.g. `J1-login`) and an `owning_sprint` pointing to the sprint that will author the executable spec.
 2. **Phase 2 sprint execution:** the `owning_sprint` implementer MUST author the spec file at `spec_path` and annotate the test with the exact `spec_tag` (e.g. `test('user signs in @J1-login', ...)`). The sprint's acceptance criteria must explicitly require this.
-3. **Phase 2 Release Gate (post-sprint-loop, when binding):** the orchestrator reads the charter's `test_strategy.journeys` block, emits `journeys.json` (keyed by `spec_tag`), runs Playwright with `--reporter=json`, extracts per-spec `spec_tag`, and checks every journey's `spec_tag` appears in the covered (green) set. When infra/test-strategy/suite are absent the gate is advisory (Rule 14).
+3. **Phase 2 Release Gate (post-sprint-loop, when binding):** the orchestrator reads the charter's `test_strategy.journeys` block, emits `journeys.json` (a JSON array of journey objects, each carrying a unique `spec_tag`), runs Playwright with `--reporter=json`, extracts per-spec `spec_tag`, and checks every journey's `spec_tag` appears in the covered (green) set. When infra/test-strategy/suite are absent the gate is advisory (Rule 14).
 4. **Phase 3 pre-merge:** in the binding case, refuses merge unless `verdict.json` holds `verdict=PASS` (or `SKIPPED` for library); otherwise advisory. See `references/phase3-merge.md`.
 
 The computed `test_strategy` block is included in the charter YAML frontmatter (see template below) and a narrative "## Test Strategy" section is included in the charter body.

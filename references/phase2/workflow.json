@@ -86,7 +86,7 @@
       "step_file": "release-gate.md",
       "mandatory_for": ["web", "backend-only"],
       "skipped_for": ["library"],
-      "note": "Runs ONCE per Phase 2 run (not per sprint). Writes .superflow/release-gate/verdict.json. Phase 3 refuses merge unless verdict=PASS or SKIPPED."
+      "note": "Runs ONCE per Phase 2 run (not per sprint). Writes .superflow/release-gate/verdict.json. Binding per enforcement Rule 14 (infra + charter test_strategy + existing test suite all present): then Phase 3 refuses merge unless verdict=PASS or SKIPPED. Advisory otherwise — record verdict, do not block."
     }
   }
 }
