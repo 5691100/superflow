@@ -9,6 +9,7 @@
 3. **Sprint-level parallelism follows git workflow mode.** Read `context.git_workflow_mode`; `parallel_wave_prs` and independent `sprint_pr_queue` waves may run concurrently, `solo_single_pr` and dependent `stacked_prs` run sequentially.
 4. **Context budget:** ~258K. Use `/compact` between sequential sprints or after each completed sprint wave. For 4+ sprints, consider session-per-wave.
 5. **No TaskCreate/TaskUpdate.** Use printf for progress tracking.
+6. **No Workflow tool, no /goal.** The saved `/superflow-review` and `/superflow-wave` workflows and the `/goal` watchdog are Claude-runtime-only. On Codex, ignore `context.use_workflows` and use the existing spawn_agent paths in this overlay — no behavior change (see `references/workflow-orchestration.md`).
 
 ## Sprint-Level Parallel Dispatch
 
@@ -56,15 +57,15 @@ Include in every implementer prompt:
 Check Claude availability: `claude --version 2>/dev/null`
 
 **If Claude available:**
-1. Claude Opus 4.7 product reviewer:
+1. Claude (Opus 4.8) product reviewer:
    ```bash
-   $TIMEOUT_CMD 600 claude --model claude-opus-4-7 --effort xhigh -p "Review the following sprint for product fit, user scenarios, data integrity, and charter compliance. $(cat prompts/claude/product-reviewer.md)
+   $TIMEOUT_CMD 600 claude --model claude-opus-4-8 --effort xhigh -p "Review the following sprint for product fit, user scenarios, data integrity, and charter compliance. $(cat prompts/claude/product-reviewer.md)
 
    SPEC: [spec text]
    PRODUCT BRIEF: [brief text]
    DIFF: $(git diff main...HEAD)" 2>&1
    ```
-2. Codex technical reviewer: spawn_agent("standard-code-reviewer") with prompt containing SPEC + brief + diff
+2. Codex technical reviewer: spawn_agent("standard-code-reviewer") with prompt containing SPEC + sprint plan tasks + Autonomy Charter + brief + diff (so the plan-completeness and charter-compliance checks have inputs)
 
 **If Claude NOT available (split-focus):**
 1. spawn_agent("standard-product-reviewer") — spec fit, user scenarios, data integrity
@@ -83,7 +84,7 @@ Same format as main doc:
   "technical_review": "APPROVE",
   "docs_update": "UPDATED|UNCHANGED",
   "docs_review": "PASS",
-  "provider": "claude-opus-4-7|split-focus",
+  "provider": "claude-opus-4-8|split-focus",
   "ts": "ISO-8601"
 }
 ```
@@ -113,13 +114,13 @@ Same as main doc (push, PR, cleanup, Telegram). PR creation is blocked until doc
 
 **Required when:** ≥4 sprints, parallel execution was used, `git_workflow_mode` is `parallel_wave_prs` or `stacked_prs`, or governance_mode="critical".
 
-1. Claude Opus 4.7 product reviewer:
+1. Claude (Opus 4.8) product reviewer:
    ```bash
-   $TIMEOUT_CMD 900 claude --model claude-opus-4-7 --effort xhigh -p "Holistic product review of all sprint changes. Focus: end-to-end user flows, data integrity across sprints, spec compliance, and charter compliance. $(cat prompts/claude/product-reviewer.md)" 2>&1
+   $TIMEOUT_CMD 900 claude --model claude-opus-4-8 --effort xhigh -p "Holistic product review of all sprint changes. Focus: end-to-end user flows, data integrity across sprints, spec compliance, and charter compliance. $(cat prompts/claude/product-reviewer.md)" 2>&1
    ```
 
 2. Codex technical: spawn_agent("deep-code-reviewer") with:
-   "Holistic review of all sprint changes. Check cross-module issues, architecture, security, performance, tests, and codebase hygiene."
+   "Holistic review of all sprint changes against the SPEC + plan + Autonomy Charter. Check cross-module issues, architecture, security, performance, tests, plan completeness, and codebase hygiene."
 
 No Claude → split-focus: spawn_agent("deep-product-reviewer") + spawn_agent("deep-code-reviewer").
 

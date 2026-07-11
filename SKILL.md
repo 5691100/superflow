@@ -29,9 +29,11 @@ superflow/
     ci/                      — CI workflow templates
       github-actions-node.yml    — GitHub Actions for Node.js
       github-actions-python.yml  — GitHub Actions for Python
-  agents/                — Agent definitions with effort frontmatter (12 definitions)
+  agents/                — Agent definitions with effort frontmatter (12 definitions, all model: opus)
+  workflows/             — Saved Claude workflows (superflow-review.js, superflow-wave.js) → ~/.claude/workflows/
+  tools/                 — detect-test-env.sh, release-gate.sh, cleanup-testcontainers.sh, verify-phase2-dag.sh, measure-phase2-context.sh
   # Phase 0 creates <project>/.claude/skills/verify/SKILL.md during onboarding
-  prompts/               — Agent prompt templates (8 prompts, incl. expert-panel.md)
+  prompts/               — Agent prompt templates (9 prompts, incl. expert-panel.md, test-strategy.md)
     codex/               — Codex-specific prompts (3 prompts)
   references/            — Phase documentation (phases 0-3)
     phase0-onboarding.md — Phase 0 router (detection, recovery matrix, stage loading)
@@ -76,6 +78,21 @@ superflow/
    d. If both pass, commit the stashed changes with appropriate message
 4. **Detect environment** (single bash call + context check):
    ```bash
+   # Re-resolve SUPERFLOW_SKILL_ROOT — step 2 ran in a separate Bash invocation; env vars
+   # do not persist between tool calls, so this block must be self-contained.
+   if [ -z "${SUPERFLOW_SKILL_ROOT:-}" ]; then
+     for d in \
+         "$HOME/.codex/skills/superflow" \
+         "$HOME/.claude/skills/superflow" \
+         "$HOME/.agents/skills/superflow" \
+         "./"; do
+       if [ -f "$d/SKILL.md" ] && [ -f "$d/superflow-enforcement.md" ]; then
+         SUPERFLOW_SKILL_ROOT="$(cd "$d" && pwd)"
+         break
+       fi
+     done
+     export SUPERFLOW_SKILL_ROOT
+   fi
    # All detection in one command — secondary provider detection
    if [ "$RUNTIME" = "codex" ]; then
      # Codex is primary → detect Claude as secondary
@@ -86,16 +103,50 @@ superflow/
    fi
    command -v gtimeout &>/dev/null && echo "TIMEOUT:gtimeout" || { command -v timeout &>/dev/null && echo "TIMEOUT:timeout" || echo "TIMEOUT:perl_fallback"; }
    test -e .git && echo "MODE:enhancement" || echo "MODE:greenfield"
-   # Deploy agent definitions + durable rules for the detected runtime.
-   # ALWAYS overwrite (v5.4.0): copy-if-missing caused deploy drift — edits to the
-   # skill's agents/rules never reached ~/.claude and stale model pins survived for weeks.
+   # ALWAYS sync skill artifacts for the detected runtime (v5.4.0 — copy-if-missing caused deploy
+   # drift; edits to agents/rules never reached ~/.claude and stale model pins survived for weeks).
+   # sf_sync = checksum sync: overwrite the deployed copy ONLY on content mismatch (cmp -s).
+   sf_sync() { [ -f "$1" ] || return 0; cmp -s "$1" "$2" 2>/dev/null || cp "$1" "$2"; }
    if [ "$RUNTIME" = "codex" ]; then
      mkdir -p ~/.codex/agents
-     cp "$SUPERFLOW_SKILL_ROOT"/codex/agents/*.toml ~/.codex/agents/ 2>/dev/null
+     for f in "$SUPERFLOW_SKILL_ROOT"/codex/agents/*.toml; do
+       sf_sync "$f" ~/.codex/agents/"$(basename "$f")"
+     done
+     sf_sync "$SUPERFLOW_SKILL_ROOT/codex/AGENTS.md" ~/.codex/AGENTS.md
+     # ~/.codex/hooks.json: install only if missing. If it exists and differs, NEVER overwrite
+     # (protects the Codex SessionStart recovery hook + local customizations) — warn to merge manually.
+     if [ ! -f ~/.codex/hooks.json ]; then
+       cp "$SUPERFLOW_SKILL_ROOT/codex/hooks.json" ~/.codex/hooks.json 2>/dev/null
+     elif ! cmp -s "$SUPERFLOW_SKILL_ROOT/codex/hooks.json" ~/.codex/hooks.json; then
+       echo "⚠️  ~/.codex/hooks.json differs from skill copy — not overwritten; merge $SUPERFLOW_SKILL_ROOT/codex/hooks.json manually"
+     fi
    else
-     mkdir -p ~/.claude/agents ~/.claude/rules
-     cp "$SUPERFLOW_SKILL_ROOT"/agents/*.md ~/.claude/agents/ 2>/dev/null
-     cp "$SUPERFLOW_SKILL_ROOT"/superflow-enforcement.md ~/.claude/rules/superflow-enforcement.md 2>/dev/null
+     mkdir -p ~/.claude/agents ~/.claude/rules ~/.claude/workflows
+     sf_sync "$SUPERFLOW_SKILL_ROOT/superflow-enforcement.md" ~/.claude/rules/superflow-enforcement.md
+     for f in "$SUPERFLOW_SKILL_ROOT"/agents/*.md; do
+       sf_sync "$f" ~/.claude/agents/"$(basename "$f")"
+     done
+     # Saved workflows → invocable as /superflow-review and /superflow-wave in any project
+     for f in "$SUPERFLOW_SKILL_ROOT"/workflows/*.js; do
+       sf_sync "$f" ~/.claude/workflows/"$(basename "$f")"
+     done
+   fi
+   # Run ID — stable identifier for state recovery after /clear (NOT event telemetry; the event
+   # stack was removed in v5.4.0). Restore from state or generate; lowercase-normalized. No emit calls.
+   if [ -z "${SUPERFLOW_RUN_ID:-}" ]; then
+     SUPERFLOW_RUN_ID=$(jq -r '.context.run_id // empty' .superflow-state.json 2>/dev/null || true)
+     if [ -z "$SUPERFLOW_RUN_ID" ]; then
+       # uuidgen uppercases on macOS — normalize to lowercase
+       SUPERFLOW_RUN_ID="$( (uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid) | tr "[:upper:]" "[:lower:]" )"
+     fi
+     export SUPERFLOW_RUN_ID
+   fi
+   # Persist run_id via jq MERGE into existing state (preserve all other fields); minimal only if absent
+   if [ -f .superflow-state.json ]; then
+     tmp=$(mktemp .superflow-state.XXXXXX)
+     jq --arg rid "$SUPERFLOW_RUN_ID" '.context = (.context // {}) | .context.run_id = $rid' .superflow-state.json > "$tmp" && mv "$tmp" .superflow-state.json
+   else
+     jq -n --arg rid "$SUPERFLOW_RUN_ID" '{"context":{"run_id":$rid}}' > .superflow-state.json
    fi
    ```
    Telegram: check deferred tools list for `mcp__plugin_telegram_telegram__reply`. **Only mention Telegram updates if detected.** Do NOT promise Telegram without the plugin.
@@ -136,7 +187,7 @@ superflow/
 ```bash
 codex --version 2>/dev/null && SECONDARY_PROVIDER="codex"
 [ -z "$SECONDARY_PROVIDER" ] && gemini --version 2>/dev/null && SECONDARY_PROVIDER="gemini"
-# If none found -> split-focus Claude (two agents, different lenses)
+# If none found -> native /code-review skill (Skill tool, high effort) -> split-focus Claude (two agents, different lenses)
 ```
 
 **When RUNTIME=codex** (Codex is orchestrator):
@@ -153,7 +204,7 @@ When RUNTIME=codex, the following differences apply throughout all phases:
 
 - **Dispatch**: use spawn_agent tool with agent name from .toml definitions in `~/.codex/agents/`
 - **Parallelism**: implicit (max_threads=6), no run_in_background needed. Recommended `max_depth=2` enables sprint supervisors to spawn per-sprint implement/review/doc agents.
-- **Claude product/research secondary**: Claude CLI — `$TIMEOUT_CMD 600 claude --model claude-opus-4-7 --effort xhigh -p "PROMPT" 2>&1`
+- **Claude product/research secondary**: Claude CLI — `$TIMEOUT_CMD 600 claude --model claude-opus-4-8 --effort xhigh -p "PROMPT" 2>&1` (Fable access is blocked — secondary runs on Opus)
 - **Durable rules**: `codex/AGENTS.md` — re-read after ANY `/compact`
 - **Progress tracking**: printf (no TaskCreate/TaskUpdate available)
 - **Hooks**: `~/.codex/hooks.json` (SessionStart + Stop), no PreCompact/PostCompact
