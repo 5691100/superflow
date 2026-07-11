@@ -64,7 +64,6 @@ All agents use `model: opus` (owner directive 2026-06-06 — supersedes the earl
 
 ## Tools & Schemas
 
-- [tools/sf-emit.sh](tools/sf-emit.sh): Source-safe bash library for JSONL event emission — `source tools/sf-emit.sh && sf_emit <type> key=val key:int=N key:bool=true key:json='...'`; validates type allowlist and key identifier regex; concurrent-safe via flock, with threshold-based log rotation to archive/ (356 lines)
 - [tools/verify-phase2-dag.sh](tools/verify-phase2-dag.sh): Static DAG verifier (Run 3 Sprint 3) — validates all 9 governance×complexity decision-matrix cells, 7-stage sequence, step_files coverage, and on-disk step file existence; exits 0 on full pass, non-zero with summary on failure; pure bash + python3 + jq
 - [tools/measure-phase2-context.sh](tools/measure-phase2-context.sh): Context savings quantifier (Run 3 Sprint 3) — computes pre-Run-3 vs post-Run-3 Phase 2 per-turn token load using git history; summary: Pre 755 lines (~10048 tokens) | Post-typical 224 lines (~2375 tokens) | Savings 76.4%
 - [templates/event-schema.json](templates/event-schema.json): JSON Schema 2020-12 defining the event envelope (`v`, `id`, `ts`, `run_id`, `type`, `data`, `instance_id`, `parent_id`) and 20 per-type data schemas; additive evolution policy (524 lines)
@@ -73,7 +72,6 @@ All agents use `model: opus` (owner directive 2026-06-06 — supersedes the earl
 
 ## Key Concepts
 
-- **Event log telemetry:** Append-only `.superflow/events.jsonl` stream grouping all events for a run under a `SUPERFLOW_RUN_ID` (UUID). Emitted via `tools/sf-emit.sh`. `run_id` is persisted to `.superflow-state.json` under `context.run_id` so `/clear` + resume restores the same run identity. Event log is telemetry — not required for execution; missing `sf-emit.sh` logs a warning and continues.
 - **Autonomy Charter:** Durable intent artifact generated at end of Phase 1. Contains goal, non-negotiables, success criteria, governance mode, and git workflow mode. Injected into every sprint prompt and reviewer context — single source of truth for autonomous execution boundaries
 - **Adaptive governance:** Three modes (light/standard/critical) auto-suggested based on task dimensions. Controls review depth, holistic review threshold, and plan structure. Light mode uses inline sprint plans in the charter
 - **Git workflow modes:** Phase 1 selects `solo_single_pr`, `sprint_pr_queue`, `stacked_prs`, `parallel_wave_prs`, or `trunk_based`. The mode is stored in `.superflow-state.json` and the charter, and controls branch bases, PR count, sprint parallelism, docs gate timing, and Phase 3 merge order
