@@ -40,7 +40,6 @@ Survives context compaction. SKILL.md does not.
 ```bash
 $TIMEOUT_CMD 600 codex exec --full-auto -m gpt-5.5 -c model_reasoning_effort=<LEVEL> "PROMPT" 2>&1          # general
 $TIMEOUT_CMD 600 codex exec review --base main -m gpt-5.5 -c model_reasoning_effort=<LEVEL> --ephemeral "PROMPT" 2>&1  # code review
-$TIMEOUT_CMD 600 gemini "PROMPT" 2>&1                                                             # Gemini
 $TIMEOUT_CMD 600 $SECONDARY_PROVIDER <non-interactive-flag> "PROMPT" 2>&1                        # Other
 # No codex → native /code-review skill (Skill tool, high effort) → two Claude agents with split focus (Product + Technical)
 ```

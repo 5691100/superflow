@@ -102,7 +102,7 @@ superflow/
      claude --version 2>/dev/null && echo "SECONDARY:claude" || echo "SECONDARY:none"
    else
      # Claude is primary → detect Codex as secondary
-     codex --version 2>/dev/null && echo "SECONDARY:codex" || { gemini --version 2>/dev/null && echo "SECONDARY:gemini" || echo "SECONDARY:none"; }
+     codex --version 2>/dev/null && echo "SECONDARY:codex" || echo "SECONDARY:none"
    fi
    command -v gtimeout &>/dev/null && echo "TIMEOUT:gtimeout" || { command -v timeout &>/dev/null && echo "TIMEOUT:timeout" || echo "TIMEOUT:perl_fallback"; }
    test -e .git && echo "MODE:enhancement" || echo "MODE:greenfield"
@@ -189,7 +189,6 @@ superflow/
 **When RUNTIME=claude** (Claude is orchestrator):
 ```bash
 codex --version 2>/dev/null && SECONDARY_PROVIDER="codex"
-[ -z "$SECONDARY_PROVIDER" ] && gemini --version 2>/dev/null && SECONDARY_PROVIDER="gemini"
 # If none found -> native /code-review skill (Skill tool, high effort) -> split-focus Claude (two agents, different lenses)
 ```
 
