@@ -132,7 +132,7 @@ reply can never pass a gate.
 - Runs in parallel: a product reviewer (follows `~/.claude/agents/standard-product-reviewer.md`,
   reads the charter at `charter_path`, reviews `branch` vs `base` via `git -C workdir diff`)
   and a technical reviewer (cds into `workdir`, applies the fallback chain itself via Bash: if
-  the Codex CLI exists, `$TIMEOUT_CMD 600 codex exec review --base <base> -m gpt-5.5 -c model_reasoning_effort=high --ephemeral`;
+  the Codex CLI exists, `$TIMEOUT_CMD 600 codex exec review --base <base> -m gpt-5.6-sol -c model_reasoning_effort=high --ephemeral`;
   else it acts as the Claude technical reviewer per `~/.claude/agents/standard-code-reviewer.md`).
   When `product:false`, only the technical thunk runs.
 - **returns:** `{product, technical, pass}` — `pass` is true only when passing verdicts hold for

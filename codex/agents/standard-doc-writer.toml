@@ -1,6 +1,6 @@
 name = "standard-doc-writer"
 description = "Documentation update agent for incremental doc updates (Phase 3)"
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
 developer_instructions = """
 <role>

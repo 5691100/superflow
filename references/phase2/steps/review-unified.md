@@ -76,7 +76,7 @@ Agent(
 
 1. **Primary — Codex** (`codex --version 2>/dev/null` exits 0):
    ```
-   $TIMEOUT_CMD 600 codex exec review --base main -m gpt-5.5 -c model_reasoning_effort=high --ephemeral \
+   $TIMEOUT_CMD 600 codex exec review --base main -m gpt-5.6-sol -c model_reasoning_effort=high --ephemeral \
         - < <(echo "SPEC_CONTEXT" | cat - prompts/codex/code-reviewer.md) 2>&1  [run_in_background]
    ```
    For deep tier, use `model_reasoning_effort=xhigh` (and `deep-product-reviewer` on the product

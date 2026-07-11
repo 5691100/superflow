@@ -171,7 +171,7 @@ for _p in \
 done
 
 if [ -n "$AUDIT_PROMPT" ]; then
-  $TIMEOUT_CMD 600 codex exec --full-auto -m gpt-5.5 -c model_reasoning_effort=xhigh "$(cat "$AUDIT_PROMPT")" 2>&1
+  $TIMEOUT_CMD 600 codex exec --full-auto -m gpt-5.6-sol -c model_reasoning_effort=xhigh "$(cat "$AUDIT_PROMPT")" 2>&1
 else
   echo "WARN: prompts/codex/audit.md not found in any skill root — falling back to Claude security agent" >&2
 fi

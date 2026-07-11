@@ -55,9 +55,9 @@ $TIMEOUT_CMD 600 claude --model claude-opus-4-8 --effort xhigh -p "PROMPT" 2>&1
 
 | Tier | Codex Agent (spawn_agent) | Claude (secondary) | When |
 |------|---------------------------|---------------------|------|
-| **deep** | deep analyst/implementer/reviewer agents (gpt-5.5, xhigh); deep-doc-writer (gpt-5.5, high) | `claude --model claude-opus-4-8 --effort xhigh -p` for product lens | Phase 0 audit, Phase 1 spec review, Phase 2 holistic |
-| **standard** | standard-* agents (gpt-5.5, high) | `claude --model claude-opus-4-8 --effort xhigh -p` for product lens | Phase 1 plan review, Phase 2 unified review, Phase 3 docs |
-| **fast** | fast-implementer (gpt-5.5, medium) | N/A | Simple implementation tasks |
+| **deep** | deep analyst/implementer/reviewer agents (gpt-5.6-sol, xhigh); deep-doc-writer (gpt-5.6-sol, high) | `claude --model claude-opus-4-8 --effort xhigh -p` for product lens | Phase 0 audit, Phase 1 spec review, Phase 2 holistic |
+| **standard** | standard-* agents (gpt-5.6-sol, high) | `claude --model claude-opus-4-8 --effort xhigh -p` for product lens | Phase 1 plan review, Phase 2 unified review, Phase 3 docs |
+| **fast** | fast-implementer (gpt-5.6-sol, medium) | N/A | Simple implementation tasks |
 
 ## Deployed Copy Sync
 

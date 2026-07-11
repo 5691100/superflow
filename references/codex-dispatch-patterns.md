@@ -46,11 +46,11 @@ Recommended Codex config is `[agents] max_threads=6, max_depth=2`. With `max_dep
 
 | Context | Claude orchestrator (Codex secondary) | Codex orchestrator (Claude secondary) |
 |---------|---------------------------------------|---------------------------------------|
-| Security audit | `codex exec --full-auto -m gpt-5.5` + `prompts/codex/audit.md` | `claude --model claude-opus-4-8 --effort xhigh -p` + `prompts/claude/audit.md` |
-| Code review | `codex exec review --base main -m gpt-5.5 --ephemeral` | spawn_agent technical reviewer |
-| Product review | `codex exec -m gpt-5.5` + `prompts/codex/product-reviewer.md` | `claude --model claude-opus-4-8 --effort xhigh -p` + `prompts/claude/product-reviewer.md` |
-| Spec review | `codex exec --full-auto -m gpt-5.5 --ephemeral` | Claude product + spawn_agent technical |
-| Plan review | `codex exec --full-auto -m gpt-5.5 --ephemeral` | Claude product + spawn_agent technical |
+| Security audit | `codex exec --full-auto -m gpt-5.6-sol` + `prompts/codex/audit.md` | `claude --model claude-opus-4-8 --effort xhigh -p` + `prompts/claude/audit.md` |
+| Code review | `codex exec review --base main -m gpt-5.6-sol --ephemeral` | spawn_agent technical reviewer |
+| Product review | `codex exec -m gpt-5.6-sol` + `prompts/codex/product-reviewer.md` | `claude --model claude-opus-4-8 --effort xhigh -p` + `prompts/claude/product-reviewer.md` |
+| Spec review | `codex exec --full-auto -m gpt-5.6-sol --ephemeral` | Claude product + spawn_agent technical |
+| Plan review | `codex exec --full-auto -m gpt-5.6-sol --ephemeral` | Claude product + spawn_agent technical |
 
 ## Split-Focus Fallback (no secondary provider)
 
@@ -67,11 +67,11 @@ Record `"provider": "split-focus"` in .par-evidence.json.
 
 | Claude Tier | Claude Model | Claude Effort | Codex Model | Codex Reasoning |
 |-------------|-------------|---------------|-------------|-----------------|
-| deep | claude-opus-4-8 | xhigh | gpt-5.5 | xhigh |
-| standard | claude-opus-4-8 | xhigh | gpt-5.5 | high |
-| fast | claude-opus-4-8 | low | gpt-5.5 | medium |
-| implementer (deep) | claude-opus-4-8 | max | gpt-5.5 | xhigh |
-| implementer (std) | claude-opus-4-8 | high | gpt-5.5 | high |
-| implementer (fast) | claude-opus-4-8 | low | gpt-5.5 | medium |
+| deep | claude-opus-4-8 | xhigh | gpt-5.6-sol | xhigh |
+| standard | claude-opus-4-8 | xhigh | gpt-5.6-sol | high |
+| fast | claude-opus-4-8 | low | gpt-5.6-sol | medium |
+| implementer (deep) | claude-opus-4-8 | max | gpt-5.6-sol | xhigh |
+| implementer (std) | claude-opus-4-8 | high | gpt-5.6-sol | high |
+| implementer (fast) | claude-opus-4-8 | low | gpt-5.6-sol | medium |
 
 > **Model note:** Fable access is blocked, so every Claude secondary (deep and standard product/review lens) runs on `claude-opus-4-8` at `xhigh` effort. There is no model-profile selection — depth is differentiated by effort.

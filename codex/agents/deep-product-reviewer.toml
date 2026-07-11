@@ -1,6 +1,6 @@
 name = "deep-product-reviewer"
 description = "Deep product acceptance review for critical reviews"
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 developer_instructions = """
 <role>

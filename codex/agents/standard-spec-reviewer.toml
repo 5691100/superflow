@@ -1,6 +1,6 @@
 name = "standard-spec-reviewer"
 description = "Standard spec compliance review for per-sprint unified review and plan review"
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
 model_reasoning_effort = "high"
 developer_instructions = """
 <role>

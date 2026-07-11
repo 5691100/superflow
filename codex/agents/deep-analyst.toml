@@ -1,6 +1,6 @@
 name = "deep-analyst"
 description = "Deep analysis agent for Phase 0 codebase audit (shared by all 4 analyst roles)"
-model = "gpt-5.5"
+model = "gpt-5.6-sol"
 model_reasoning_effort = "xhigh"
 developer_instructions = """
 <role>

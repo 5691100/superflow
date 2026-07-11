@@ -10,7 +10,7 @@ Survives context compaction. SKILL.md does not.
 2b. **State isolation.** `.superflow-state.json` lives in the PROJECT root; `/root/.superflow-state.json` belongs only to runs rooted at `/root`. Never write another project's state file; re-read state immediately before every overwrite (concurrent runs share the machine).
 3. **Unified Review before every PR** (2 agents for standard/critical sprints; single Technical reviewer for light-mode sprints). Review verifies the sprint **contract** (Rule 3a) criterion-by-criterion — not the raw request. (When `context.use_workflows=true`, steps 1-4 may run via the saved `/superflow-review` workflow — see `references/workflow-orchestration.md`; later steps unchanged.)
    1. Dispatch Claude product reviewer (subagent_type: standard-product-reviewer) as a named background agent: `name: sprint-<N>-product-reviewer`, `run_in_background: true`.
-   2. Dispatch secondary technical reviewer — fallback chain: (1) `$TIMEOUT_CMD 600 codex exec review --base main -m gpt-5.5 -c model_reasoning_effort=high --ephemeral`; (2) native `/code-review` skill via the Skill tool at high effort; (3) two split-focus Claude agents (Product + Technical). `/code-review ultra` is user-triggered and billed — NEVER launch it; only suggest it to the user as an optional extra gate at Phase 3 pre-merge.
+   2. Dispatch secondary technical reviewer — fallback chain: (1) `$TIMEOUT_CMD 600 codex exec review --base main -m gpt-5.6-sol -c model_reasoning_effort=high --ephemeral`; (2) native `/code-review` skill via the Skill tool at high effort; (3) two split-focus Claude agents (Product + Technical). `/code-review ultra` is user-triggered and billed — NEVER launch it; only suggest it to the user as an optional extra gate at Phase 3 pre-merge.
    3. Verdict contract: every reviewer ends its final message with a fenced `json` block — `{"verdict": "APPROVE|ACCEPTED|PASS|REQUEST_CHANGES|NEEDS_FIXES|FAIL", "findings": [{"severity": "critical|high|medium|low", "file": "...", "line": 0, "scenario": "breakage scenario", "description": "..."}], "summary": "..."}`. Extract the fence (awk/sed → jq) and assemble `.par-evidence.json` mechanically from the verdict fields — no prose parsing.
    4. Wait for both. Fix confirmed issues (NEEDS_FIXES, REQUEST_CHANGES, or FAIL). Re-engage ONLY the flagging reviewer via SendMessage (its original context intact), scoped to the fix diff + its original findings. Cold re-dispatch is the fallback if the agent is gone.
    5. Run mandatory sprint documentation update (`CLAUDE.md` + `llms.txt`) before PR creation. `llms.txt` must be explicitly checked on every sprint, even if unchanged.
@@ -38,8 +38,8 @@ Survives context compaction. SKILL.md does not.
 
 **When Claude is orchestrator (RUNTIME:claude):**
 ```bash
-$TIMEOUT_CMD 600 codex exec --full-auto -m gpt-5.5 -c model_reasoning_effort=<LEVEL> "PROMPT" 2>&1          # general
-$TIMEOUT_CMD 600 codex exec review --base main -m gpt-5.5 -c model_reasoning_effort=<LEVEL> --ephemeral "PROMPT" 2>&1  # code review
+$TIMEOUT_CMD 600 codex exec --full-auto -m gpt-5.6-sol -c model_reasoning_effort=<LEVEL> "PROMPT" 2>&1          # general
+$TIMEOUT_CMD 600 codex exec review --base main -m gpt-5.6-sol -c model_reasoning_effort=<LEVEL> --ephemeral "PROMPT" 2>&1  # code review
 $TIMEOUT_CMD 600 $SECONDARY_PROVIDER <non-interactive-flag> "PROMPT" 2>&1                        # Other
 # No codex → native /code-review skill (Skill tool, high effort) → two Claude agents with split focus (Product + Technical)
 ```
@@ -57,9 +57,9 @@ See `references/codex-dispatch-patterns.md` for the complete dispatch mapping.
 
 | Tier | Claude Agent (subagent_type) | Codex | When |
 |------|-------------------------------|-------|------|
-| **deep** | `deep-spec-reviewer`, `deep-code-reviewer`, `deep-product-reviewer`, `deep-analyst`, `deep-doc-writer`, `deep-implementer` (opus, effort: max) | `-m gpt-5.5 -c model_reasoning_effort=xhigh` + `prompts/codex/` | Phase 0 audit+security, Phase 1 spec review, Phase 2 final holistic, llms.txt/CLAUDE.md generation |
-| **standard** | `standard-spec-reviewer`, `standard-code-reviewer`, `standard-product-reviewer`, `standard-doc-writer`, `standard-implementer` (opus, effort: high) | `-m gpt-5.5 -c model_reasoning_effort=high` + `prompts/codex/` | Phase 1 plan review, Phase 2 unified review, Phase 3 doc updates |
-| **fast** | `fast-implementer` (opus, effort: low) | `-m gpt-5.5 -c model_reasoning_effort=medium` | Simple implementation tasks |
+| **deep** | `deep-spec-reviewer`, `deep-code-reviewer`, `deep-product-reviewer`, `deep-analyst`, `deep-doc-writer`, `deep-implementer` (opus, effort: max) | `-m gpt-5.6-sol -c model_reasoning_effort=xhigh` + `prompts/codex/` | Phase 0 audit+security, Phase 1 spec review, Phase 2 final holistic, llms.txt/CLAUDE.md generation |
+| **standard** | `standard-spec-reviewer`, `standard-code-reviewer`, `standard-product-reviewer`, `standard-doc-writer`, `standard-implementer` (opus, effort: high) | `-m gpt-5.6-sol -c model_reasoning_effort=high` + `prompts/codex/` | Phase 1 plan review, Phase 2 unified review, Phase 3 doc updates |
+| **fast** | `fast-implementer` (opus, effort: low) | `-m gpt-5.6-sol -c model_reasoning_effort=medium` | Simple implementation tasks |
 
 Agent definitions with effort frontmatter are deployed (ALWAYS overwritten, v5.4.0) to `~/.claude/agents/` during SKILL.md startup step 4. Agent() does NOT accept inline `effort` — controlled via agent definition files only.
 
