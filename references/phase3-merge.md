@@ -1,29 +1,5 @@
 # Phase 3: Merge (USER-INITIATED)
 
-```bash
-# Event emission preloader — idempotent, runs at top of every phase doc bash usage.
-# Tries (in order): already-sourced sf_emit → local tools/sf-emit.sh → runtime-aware paths → no-op.
-# Also restores SUPERFLOW_RUN_ID from state if unset.
-if ! command -v sf_emit >/dev/null 2>&1; then
-  for _sf_path in \
-      "./tools/sf-emit.sh" \
-      "$HOME/.claude/skills/superflow/tools/sf-emit.sh" \
-      "$HOME/.codex/skills/superflow/tools/sf-emit.sh" \
-      "$HOME/.agents/skills/superflow/tools/sf-emit.sh"; do
-    if [ -f "$_sf_path" ]; then source "$_sf_path"; break; fi
-  done
-  command -v sf_emit >/dev/null 2>&1 || sf_emit() { return 0; }
-fi
-if [ -z "${SUPERFLOW_RUN_ID:-}" ] && [ -f .superflow-state.json ]; then
-  SUPERFLOW_RUN_ID=$(python3 -c 'import json; print(json.load(open(".superflow-state.json")).get("context",{}).get("run_id",""))' 2>/dev/null)
-  [ -n "$SUPERFLOW_RUN_ID" ] && export SUPERFLOW_RUN_ID
-fi
-# If run_id still unavailable after best-effort restore, install no-op to avoid set -e aborts
-if [ -z "${SUPERFLOW_RUN_ID:-}" ]; then
-  sf_emit() { return 0; }
-fi
-```
-
 Triggered when user says "merge", "мёрдж", "мерж", or gives clear affirmative response (e.g., "go ahead", "do it", "yes") after the Completion Report.
 
 ## Stage Structure
@@ -66,7 +42,6 @@ s = json.load(open(p)) if os.path.exists(p) else {}
 s.update({'version':1,'phase':3,'phase_label':'Merge','stage':'pre-merge','stage_index':0,'last_updated':datetime.datetime.now(datetime.timezone.utc).isoformat()})
 json.dump(s, open(p,'w'), indent=2)
 "
-sf_emit phase.start phase:int=3 label="Merge"
 ```
 
 After each stage transition, update via python3:
@@ -111,9 +86,6 @@ TaskCreate(
 
 ---
 
-```bash
-sf_emit stage.start stage=pre-merge phase:int=3
-```
 
 ## Pre-Merge Checklist
 <!-- Stage 1: Pre-merge -->
@@ -157,10 +129,6 @@ git worktree prune
 
 If CWD is already inside a worktree, ALL subsequent commands will fail with "Path does not exist" after `--delete-branch` removes the branch. This is unrecoverable within the same shell.
 
-```bash
-sf_emit stage.end stage=pre-merge phase:int=3
-sf_emit stage.start stage=merge phase:int=3
-```
 
 ## Merge Order
 <!-- Stage 2: Merge -->
@@ -196,7 +164,6 @@ for each PR in sprint order:
      # NOTE: no event emitted on CI failure/abandon — pr.merge is reserved for successful merges.
      # Failed-merge telemetry is TBD (see CHANGELOG deferred).
   2. gh pr merge <number> --rebase --delete-branch
-     sf_emit pr.merge number:int=NNN method=rebase  # replace NNN with actual PR number
   3. If merge fails due to conflict:
      a. git fetch origin main
      b. git checkout <branch>
@@ -237,10 +204,6 @@ If `gh pr checks <number>` shows failing checks:
 6. If CI still fails after 2 fix attempts: stop and report to user with error details
 7. Resume merge sequence from the failed PR
 
-```bash
-sf_emit stage.end stage=merge phase:int=3
-sf_emit stage.start stage=post-merge phase:int=3
-```
 
 ## Post-Merge Verification
 <!-- Stage 2: Merge (final step) -->
@@ -277,11 +240,6 @@ mcp__plugin_telegram_telegram__reply(chat_id: <chat_id from context>, text: "<po
 ```
 Include merged PR numbers, CI status, test results, and branch cleanup status in the summary.
 
-```bash
-sf_emit stage.end stage=post-merge phase:int=3
-sf_emit phase.end phase:int=3 label="Merge"
-sf_emit run.end status=completed
-```
 
 ## Known Issues
 

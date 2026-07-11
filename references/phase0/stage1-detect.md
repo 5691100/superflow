@@ -1,30 +1,6 @@
 # Phase 0 — Stage 1: Detect & Confirm
 <!-- Stage 1, Todos: parallel preflight, present confirmation, handle response -->
 
-```bash
-# Event emission preloader — idempotent, runs at top of every phase doc bash usage.
-# Tries (in order): already-sourced sf_emit → local tools/sf-emit.sh → runtime-aware paths → no-op.
-# Also restores SUPERFLOW_RUN_ID from state if unset.
-if ! command -v sf_emit >/dev/null 2>&1; then
-  for _sf_path in \
-      "./tools/sf-emit.sh" \
-      "$HOME/.claude/skills/superflow/tools/sf-emit.sh" \
-      "$HOME/.codex/skills/superflow/tools/sf-emit.sh" \
-      "$HOME/.agents/skills/superflow/tools/sf-emit.sh"; do
-    if [ -f "$_sf_path" ]; then source "$_sf_path"; break; fi
-  done
-  command -v sf_emit >/dev/null 2>&1 || sf_emit() { return 0; }
-fi
-if [ -z "${SUPERFLOW_RUN_ID:-}" ] && [ -f .superflow-state.json ]; then
-  SUPERFLOW_RUN_ID=$(python3 -c 'import json; print(json.load(open(".superflow-state.json")).get("context",{}).get("run_id",""))' 2>/dev/null)
-  [ -n "$SUPERFLOW_RUN_ID" ] && export SUPERFLOW_RUN_ID
-fi
-# If run_id still unavailable after best-effort restore, install no-op to avoid set -e aborts
-if [ -z "${SUPERFLOW_RUN_ID:-}" ]; then
-  sf_emit() { return 0; }
-fi
-```
-
 Runs at Phase 0 entry. Detects project state automatically, presents a one-line summary for user confirmation, and routes to the correct path (existing project, greenfield, or skip).
 
 **All documentation output in English.** Communicate with the user in their language.
@@ -81,7 +57,6 @@ fd, tmp = tempfile.mkstemp(dir=os.path.dirname(p) or '.', prefix='.superflow-sta
 with os.fdopen(fd, 'w') as f: json.dump(s, f, indent=2)
 os.replace(tmp, p)
 "
-sf_emit stage.start stage=detect phase:int=0
 ```
 
 ---
@@ -262,10 +237,6 @@ json.dump(s, open('.superflow-state.json', 'w'), indent=2)
 "
 ```
 
-```bash
-sf_emit stage.end stage=detect phase:int=0
-sf_emit phase.end phase:int=0 label="Onboarding"
-```
 
 Tell user Phase 0 was skipped, then re-read `references/phase1-discovery.md` and begin Phase 1.
 

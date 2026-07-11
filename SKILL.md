@@ -82,61 +82,25 @@ superflow/
      claude --version 2>/dev/null && echo "SECONDARY:claude" || echo "SECONDARY:none"
    else
      # Claude is primary → detect Codex as secondary
-     codex --version 2>/dev/null && echo "SECONDARY:codex" || { gemini --version 2>/dev/null && echo "SECONDARY:gemini" || { aider --version 2>/dev/null && echo "SECONDARY:aider" || echo "SECONDARY:none"; }; }
+     codex --version 2>/dev/null && echo "SECONDARY:codex" || { gemini --version 2>/dev/null && echo "SECONDARY:gemini" || echo "SECONDARY:none"; }
    fi
    command -v gtimeout &>/dev/null && echo "TIMEOUT:gtimeout" || { command -v timeout &>/dev/null && echo "TIMEOUT:timeout" || echo "TIMEOUT:perl_fallback"; }
    test -e .git && echo "MODE:enhancement" || echo "MODE:greenfield"
-   # Deploy agent definitions for the detected runtime
+   # Deploy agent definitions + durable rules for the detected runtime.
+   # ALWAYS overwrite (v5.4.0): copy-if-missing caused deploy drift — edits to the
+   # skill's agents/rules never reached ~/.claude and stale model pins survived for weeks.
    if [ "$RUNTIME" = "codex" ]; then
      mkdir -p ~/.codex/agents
-     test -f ~/.codex/agents/deep-analyst.toml || cp "$SUPERFLOW_SKILL_ROOT"/codex/agents/*.toml ~/.codex/agents/ 2>/dev/null
+     cp "$SUPERFLOW_SKILL_ROOT"/codex/agents/*.toml ~/.codex/agents/ 2>/dev/null
    else
-     test -f ~/.claude/agents/deep-analyst.md || cp ~/.claude/skills/superflow/agents/*.md ~/.claude/agents/ 2>/dev/null
+     mkdir -p ~/.claude/agents ~/.claude/rules
+     cp "$SUPERFLOW_SKILL_ROOT"/agents/*.md ~/.claude/agents/ 2>/dev/null
+     cp "$SUPERFLOW_SKILL_ROOT"/superflow-enforcement.md ~/.claude/rules/superflow-enforcement.md 2>/dev/null
    fi
    ```
    Telegram: check deferred tools list for `mcp__plugin_telegram_telegram__reply`. **Only mention Telegram updates if detected.** Do NOT promise Telegram without the plugin.
    **Codex runtime:** also persist runtime to state: `context.runtime = "codex"` when writing `.superflow-state.json`.
-4b. **Event log setup** — initialize the run's event log:
-    ```bash
-    # Restore or generate SUPERFLOW_RUN_ID — preserve across resumes
-    if [ -z "${SUPERFLOW_RUN_ID:-}" ]; then
-      SUPERFLOW_RUN_ID=$(jq -r '.context.run_id // empty' .superflow-state.json 2>/dev/null || true)
-      if [ -z "$SUPERFLOW_RUN_ID" ]; then
-        SUPERFLOW_RUN_ID="$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid)"
-      fi
-      export SUPERFLOW_RUN_ID
-    fi
-    # Persist run_id into state — always, even on first run (creates minimal state if absent)
-    mkdir -p .superflow
-    if [ -f .superflow-state.json ]; then
-      tmp=$(mktemp .superflow-state.XXXXXX)
-      jq --arg rid "$SUPERFLOW_RUN_ID" '.context = (.context // {}) | .context.run_id = $rid' .superflow-state.json > "$tmp" && mv "$tmp" .superflow-state.json
-    else
-      jq -n --arg rid "$SUPERFLOW_RUN_ID" '{"context":{"run_id":$rid}}' > .superflow-state.json
-    fi
-    # Derive current phase from persisted state (0 = onboarding/first-time, which is correct)
-    CURRENT_PHASE=$(jq -r '.phase // 0' .superflow-state.json 2>/dev/null || echo 0)
-    export CURRENT_PHASE
-    # Runtime-aware path discovery — try Claude, Codex, agents, then repo-local
-    _SF_EMIT_FOUND=""
-    for p in \
-        "$SUPERFLOW_SKILL_ROOT/tools/sf-emit.sh" \
-        "$HOME/.codex/skills/superflow/tools/sf-emit.sh" \
-        "$HOME/.claude/skills/superflow/tools/sf-emit.sh" \
-        "$HOME/.agents/skills/superflow/tools/sf-emit.sh" \
-        "./tools/sf-emit.sh"; do
-      if [ -f "$p" ]; then source "$p"; _SF_EMIT_FOUND=1; break; fi
-    done
-    if [ -z "${_SF_EMIT_FOUND:-}" ]; then
-      echo "⚠️  sf-emit.sh not found — event telemetry disabled (see superflow v5 Run 2)" >&2
-      sf_emit() { return 0; }
-    fi
-    sf_emit run.start runtime="${RUNTIME:-claude}" phase:int="$CURRENT_PHASE" || true
-    ```
-    Persist `SUPERFLOW_RUN_ID` into `.superflow-state.json` under `context.run_id` for recovery after `/clear`.
-
-    Note: If `tools/sf-emit.sh` is missing (v4.x installs without Run 2), log a one-line warning and continue — event log is telemetry, not required for execution.
-5. **Check `.superflow-state.json`** for resume context:
+5. **Check state** for resume context. **State isolation (v5.4.0, after the documented collision incident):** the state file lives in the PROJECT root — `<project-root>/.superflow-state.json`. `/root/.superflow-state.json` belongs ONLY to runs whose project root IS `/root`; never write another project's state there, and re-read the file immediately before every overwrite (a concurrent run may have advanced it). Resume logic:
    - If `phase = 2` AND current branch is `main`:
      - If `context.charter_file` exists on disk → valid resume (handoff, mid-execution, or completed)
      - Else → state is stale from a previous run. Reset: write fresh state with phase=1
@@ -144,8 +108,8 @@ superflow/
    - If `phase >= 2` AND on `feat/*` branch → valid resume, proceed with session recovery
    - If `phase = 1` → resume Phase 1 from saved stage
    - **Do NOT read old briefs, plans, or sprint queues from previous runs**
-4a. **Heartbeat validation** — if `.superflow-state.json` has a `heartbeat` block, check `heartbeat.must_reread`. For each path: if already read in this session → skip. If not in context → Read it (only short orchestration files belong here; Rule 12 guarantees they are <300 lines). If a listed file does not exist on disk, skip silently and emit a one-line warning. See enforcement Rule 12 for the full, compaction-surviving version of this check.
-5. **Phase 0 gate** (inline — do NOT read phase0-onboarding.md unless needed):
+6. **Heartbeat validation** — if `.superflow-state.json` has a `heartbeat` block, check `heartbeat.must_reread`. For each path: if already read in this session → skip. If not in context → Read it (only short orchestration files belong here; Rule 12 guarantees they are <300 lines). If a listed file does not exist on disk, skip silently and emit a one-line warning. See enforcement Rule 12 for the full, compaction-surviving version of this check.
+7. **Phase 0 gate** (inline — do NOT read phase0-onboarding.md unless needed):
    - If `.superflow-state.json` exists AND `phase > 0` → skip Phase 0
    - If `.superflow-state.json` exists AND `phase = 0` → read `references/phase0-onboarding.md` for crash recovery
    - If `.superflow-state.json` does not exist → **check main branch for markers before triggering Phase 0**:
@@ -155,21 +119,16 @@ superflow/
      ```
      - `MARKER_LOCAL` or `MARKER_ON_MAIN` → skip Phase 0, write fresh state with phase=1
      - `NO_MARKER` → read `references/phase0-onboarding.md` for full Phase 0
-6. **Display startup banner** — output immediately after detection, before any phase routing:
+8. **Display startup banner** — one line, then status:
    ```
-   ╔═══════════════════════════════════╗
-   ║  ⚡ SUPERFLOW v5.3.0              ║
-   ║  Autonomous Dev Workflow          ║
-   ╚═══════════════════════════════════╝
+   ⚡ SUPERFLOW v5.4.0 — Autonomous Dev Workflow
    ```
-   IMPORTANT: The `║` characters on the right side MUST align vertically. Count characters carefully — each line between `║` markers must be the same width. Test by verifying all `║` on the right are in the same column.
-
    Then list detected status using checkmarks/warnings:
    - `✅` / `—` for: secondary provider (name + version), timeout command, Telegram
    - `⚠️` for: missing state file, Phase 0 required, stale state detected
    - Final line: `Mode: enhancement/greenfield | Phase: N | Governance: mode/—`
    Keep it compact (banner + 4-6 status lines). Do not repeat detection details already shown.
-7. Read project-specific docs if needed (CLAUDE.md is already loaded as project instructions — do not re-read)
+9. Read project-specific docs if needed (CLAUDE.md is already loaded as project instructions — do not re-read)
 
 ## Secondary Provider Detection
 
@@ -177,7 +136,6 @@ superflow/
 ```bash
 codex --version 2>/dev/null && SECONDARY_PROVIDER="codex"
 [ -z "$SECONDARY_PROVIDER" ] && gemini --version 2>/dev/null && SECONDARY_PROVIDER="gemini"
-[ -z "$SECONDARY_PROVIDER" ] && aider --version 2>/dev/null && SECONDARY_PROVIDER="aider"
 # If none found -> split-focus Claude (two agents, different lenses)
 ```
 

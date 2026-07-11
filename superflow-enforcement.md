@@ -5,8 +5,9 @@ Survives context compaction. SKILL.md does not.
 ## Hard Rules
 
 1. **Subagents write all code.** Orchestrator reads, plans, reviews, dispatches.
-2. **Honor selected git workflow mode.** Read `context.git_workflow_mode` from `.superflow-state.json` before Phase 2 work. If missing, default to `sprint_pr_queue`. Valid modes: `solo_single_pr`, `sprint_pr_queue`, `stacked_prs`, `parallel_wave_prs`, `trunk_based`. See `references/git-workflow-modes.md`.
+2. **Honor selected git workflow mode.** Read `context.git_workflow_mode` from `.superflow-state.json` before Phase 2 work. If missing: default to `local_commit` when the repo has no GitHub remote with CI, else `sprint_pr_queue`. Valid modes: `solo_single_pr`, `sprint_pr_queue`, `stacked_prs`, `parallel_wave_prs`, `trunk_based`, `local_commit`. See `references/git-workflow-modes.md`.
 2a. **Use isolated branches/worktrees.** For sprint-based modes, use `git worktree add .worktrees/sprint-N feat/<feature>-sprint-N`. For `solo_single_pr`, use one `feat/<feature>` branch/worktree for the run. Verify `.worktrees/` is in `.gitignore` before creating (`git check-ignore -q .worktrees`).
+2b. **State isolation.** `.superflow-state.json` lives in the PROJECT root; `/root/.superflow-state.json` belongs only to runs rooted at `/root`. Never write another project's state file; re-read state immediately before every overwrite (concurrent runs share the machine).
 3. **Unified Review before every PR** (2 agents for standard/critical sprints; single Technical reviewer for light-mode sprints). Review verifies the sprint **contract** (Rule 3a) criterion-by-criterion — not the raw request:
    1. Dispatch Claude product reviewer (subagent_type: standard-product-reviewer). `run_in_background: true`
    2. Dispatch secondary technical reviewer: `$TIMEOUT_CMD 600 codex exec review --base main -m gpt-5.5 -c model_reasoning_effort=high --ephemeral` (or Claude code-quality if no secondary)
@@ -23,13 +24,12 @@ Survives context compaction. SKILL.md does not.
 5. **Re-read phase docs** at each sprint boundary via Read tool.
 6. **Dual-model reviews: specialize, don't duplicate.** Claude = Product lens (spec fit, user scenarios, data integrity). Secondary = Technical lens (correctness, security, architecture). No overlapping roles.
 7. **No secondary provider = two Claude agents.** Product (product-reviewer) + Technical (code-quality-reviewer).
-8. **PR policy follows git workflow mode.** `solo_single_pr` creates one final PR; `sprint_pr_queue`, `stacked_prs`, and `parallel_wave_prs` create PRs per sprint; `trunk_based` creates short-lived PRs per deployable slice. Execute silently after plan approval.
-8a. **NEVER `gh pr merge --admin`.** If CI is red, fix CI first. After every `gh pr create`, run `gh run list` and wait for CI green before merging. If CI fails, investigate with `gh run view <id> --log-failed`, fix, push, wait for green.
+8. **PR policy follows git workflow mode.** `solo_single_pr` creates one final PR; `sprint_pr_queue`, `stacked_prs`, and `parallel_wave_prs` create PRs per sprint; `trunk_based` creates short-lived PRs per deployable slice; **`local_commit`** (repo with no CI remote, e.g. backup-only) creates NO PRs — sprint branch merges locally to main after the Rule 3 gate passes, then push to the backup remote (durable = commit+push). Execute silently after plan approval.
+8a. **NEVER `gh pr merge --admin`.** Applies to PR modes (repo has a GitHub remote with CI). If CI is red, fix CI first. After every `gh pr create`, run `gh run list` and wait for CI green before merging. If CI fails, investigate with `gh run view <id> --log-failed`, fix, push, wait for green. In `local_commit` mode there is no PR/CI lane — the Rule 3 gate (reviews + PAR + docs) is the merge gate.
 9. **Final Holistic Review — conditional.** Required when: ≥4 sprints, parallel execution, `git_workflow_mode` is `parallel_wave_prs` or `stacked_prs`, or governance_mode="critical". Skip for ≤3 linear sequential sprints in light/standard mode. When required: two reviewers (Claude deep-product + Codex high technical, or 2 split-focus Claude) review ALL code as a unified system. Fix CRITICAL/HIGH before Completion Report.
 10. **Governance mode fixed for the run.** Replanner adjusts sprint scope, not governance mode. Once selected in Phase 1 Step 2, the mode persists through all sprints in the run.
 11. **Orchestrator delegates investigation to subagents.** In Phase 2 the orchestrator does NOT use Read/Grep/Glob directly on source files larger than 50 lines, and does NOT use Bash for anything beyond: status checks (`git status`, `gh run list`, `gh pr view`, `ls`, `pwd`, `which`, `date`), state I/O (`.superflow-state.json`, `.par-evidence.json`, CHANGELOG appends), and short `echo`/`printf` for user-visible progress. Any code reading, codebase exploration, research, or investigation → dispatch `deep-analyst` (or `standard-implementer` for lighter work) and require a <2k-token summary in response. Raw file contents do not belong in the orchestrator's context. See `references/phase2-execution.md` § Orchestrator Tool Budget. **In Codex runtime:** `spawn_agent` replaces `Agent()`. Same budget rules apply. See `references/codex-dispatch-patterns.md`.
 12. **Heartbeat check every orchestrator turn.** If a `heartbeat` block exists in `.superflow-state.json`, check `heartbeat.must_reread` before any tool call that advances work. "In current context" means the file was Read earlier in this conversation/session and its content is visible in the current transcript. For each listed path: if already in context → skip; if missing from context → Read it immediately (short rule/charter files are always allowed under Rule 11 exceptions). If a listed file does not exist on disk, skip it silently and emit a one-line warning. If `heartbeat.updated_at` is >30 min old, emit a fresh heartbeat snapshot. Heartbeat is defense against compaction drift — skipping it defeats Rule 5 (re-read phase docs at sprint boundaries). **`must_reread` MUST contain ONLY short orchestration files** (enforcement rules, charter, the phase2 router — all <300 lines, always allowed under Rule 11). Long source files MUST NEVER appear in `must_reread` — if code understanding is needed post-compaction, dispatch `deep-analyst`, not a direct Read.
-13. **Event emission on state transition.** Every state transition (stage change, sprint boundary, phase boundary, review verdict, PR create/merge, test run) emits a matching event via `sf_emit <type> key=value...`. See `tools/sf-emit.sh` (library) and `templates/event-schema.json` (schema contract). `.superflow-state.json` remains authoritative; events are derived telemetry. sf-emit rejects unknown types at the library layer — do not invent types outside the schema.
 
 ## Secondary Provider Invocation
 
@@ -58,7 +58,7 @@ See `references/codex-dispatch-patterns.md` for the complete dispatch mapping.
 | **standard** | `standard-spec-reviewer`, `standard-code-reviewer`, `standard-product-reviewer`, `standard-doc-writer` (opus, effort: medium); `standard-implementer` (opus, effort: medium) | `-m gpt-5.5 -c model_reasoning_effort=high` + `prompts/codex/` | Phase 1 plan review, Phase 2 unified review, Phase 3 doc updates |
 | **fast** | `fast-implementer` (opus, effort: low) | `-m gpt-5.5 -c model_reasoning_effort=medium` | Simple implementation tasks |
 
-Agent definitions with effort frontmatter are deployed to `~/.claude/agents/` during SKILL.md startup (step 3). Agent() does NOT accept inline `effort` — controlled via agent definition files only.
+Agent definitions with effort frontmatter are deployed (ALWAYS overwritten, v5.4.0) to `~/.claude/agents/` during SKILL.md startup step 4. Agent() does NOT accept inline `effort` — controlled via agent definition files only.
 
 **CRITICAL: Always pass `model:` explicitly in every Agent() call.** Frontmatter `model:` in agent definitions is NOT reliably inherited — without explicit `model:`, subagents inherit the parent's model, burning expensive tokens on implementation tasks. Rule (owner directive 2026-06-06): **ALL agents → `model: "opus"`** (plain opus) — implementers, fixers, reviewers, analysts, doc-writers alike. The earlier sonnet-for-implementers / `claude-opus-4-6` guidance is SUPERSEDED.
 
@@ -80,10 +80,9 @@ If you think any of these, STOP and do the thing:
 - "One big PR is easier" → follow `context.git_workflow_mode`; one big PR is allowed only in `solo_single_pr`
 - "This sprint is too small for PAR" → run PAR
 - "Per-sprint PAR is enough" → check if holistic is required (Rule 9 conditions)
-- "I'll just git merge locally" → use `gh pr merge --rebase --delete-branch`
+- "I'll just git merge locally" → allowed ONLY in `local_commit` mode (and only after the Rule 3 gate); in PR modes use `gh pr merge --rebase --delete-branch`
 - "CI is broken but my tests pass locally" → fix CI first, then merge
 - "I'll use --admin to bypass CI" → NEVER. Fix the CI failure. Branch protection is there for a reason.
-- "I'll emit the event later" → emit immediately on the transition, before the next tool call
 - "I'll just quickly Read this file myself" → dispatch `deep-analyst` with the specific question; take the summary back
 - "It's just one Grep" → if the result could be >50 lines or context is already >60% of budget, dispatch instead
 
@@ -99,7 +98,7 @@ On first run (no Superflow artifacts detected), Phase 0 is mandatory. Do not ski
 
 After Phase 2 Completion Report, do not merge without user saying "merge" / "мёрдж". Merge follows strict order: sequential, rebase, CI green, docs updated. `references/phase3-merge.md`
 
-**Phase 3 merge method:** Always `gh pr merge <number> --rebase --delete-branch`. NEVER use local `git merge` — it leaves GitHub PRs open and creates merge commits instead of linear history. Re-read `references/phase3-merge.md` before each PR merge if context was compacted.
+**Phase 3 merge method:** In PR modes always `gh pr merge <number> --rebase --delete-branch` — local `git merge` leaves GitHub PRs open and creates merge commits instead of linear history. In `local_commit` mode: exit worktree → `git merge --no-ff <branch>` (or rebase-ff) to main → push backup remote → remove worktree. Re-read `references/phase3-merge.md` before each merge if context was compacted.
 
 ## Telegram Progress
 

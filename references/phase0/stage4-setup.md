@@ -1,30 +1,6 @@
 # Phase 0 — Stage 4: Documentation & Environment
 <!-- Stage 4, Todos: dispatch 3 branches, wait, validate, recommend skills/plugins -->
 
-```bash
-# Event emission preloader — idempotent, runs at top of every phase doc bash usage.
-# Tries (in order): already-sourced sf_emit → local tools/sf-emit.sh → runtime-aware paths → no-op.
-# Also restores SUPERFLOW_RUN_ID from state if unset.
-if ! command -v sf_emit >/dev/null 2>&1; then
-  for _sf_path in \
-      "./tools/sf-emit.sh" \
-      "$HOME/.claude/skills/superflow/tools/sf-emit.sh" \
-      "$HOME/.codex/skills/superflow/tools/sf-emit.sh" \
-      "$HOME/.agents/skills/superflow/tools/sf-emit.sh"; do
-    if [ -f "$_sf_path" ]; then source "$_sf_path"; break; fi
-  done
-  command -v sf_emit >/dev/null 2>&1 || sf_emit() { return 0; }
-fi
-if [ -z "${SUPERFLOW_RUN_ID:-}" ] && [ -f .superflow-state.json ]; then
-  SUPERFLOW_RUN_ID=$(python3 -c 'import json; print(json.load(open(".superflow-state.json")).get("context",{}).get("run_id",""))' 2>/dev/null)
-  [ -n "$SUPERFLOW_RUN_ID" ] && export SUPERFLOW_RUN_ID
-fi
-# If run_id still unavailable after best-effort restore, install no-op to avoid set -e aborts
-if [ -z "${SUPERFLOW_RUN_ID:-}" ]; then
-  sf_emit() { return 0; }
-fi
-```
-
 Re-read this file at the start of Stage 4. Context compaction during Stage 3 erases prior content.
 
 **State source of truth:** Read `context.approval` from `.superflow-state.json` before dispatching any branch. Do not rely on LLM context.
@@ -46,7 +22,6 @@ s['stage']='setup'; s['stage_index']=3
 s['last_updated']=datetime.datetime.now(datetime.timezone.utc).isoformat()
 json.dump(s,open('.superflow-state.json','w'),indent=2)
 "
-sf_emit stage.start stage=setup phase:int=0
 ```
 
 TaskCreate:
@@ -268,7 +243,6 @@ s['stage']='completion'; s['stage_index']=4
 s['last_updated']=datetime.datetime.now(datetime.timezone.utc).isoformat()
 json.dump(s,open('.superflow-state.json','w'),indent=2)
 "
-sf_emit stage.end stage=setup phase:int=0
 ```
 
 TaskUpdate: mark all todos complete, status="completed". Proceed to Stage 5 (Completion).

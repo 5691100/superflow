@@ -32,9 +32,6 @@ For each feature group:
 
 **4. What's Next** — suggested next action: "Ready to merge — say 'merge' to start Phase 3"
 
-```bash
-sf_emit phase.end phase:int=2 label="Autonomous Execution"
-```
 
 ### Tone
 

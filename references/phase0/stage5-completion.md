@@ -1,30 +1,6 @@
 # Phase 0 — Stage 5: Completion
 <!-- Stage 5, Todos: write markers, persist tech debt, update state, show summary -->
 
-```bash
-# Event emission preloader — idempotent, runs at top of every phase doc bash usage.
-# Tries (in order): already-sourced sf_emit → local tools/sf-emit.sh → runtime-aware paths → no-op.
-# Also restores SUPERFLOW_RUN_ID from state if unset.
-if ! command -v sf_emit >/dev/null 2>&1; then
-  for _sf_path in \
-      "./tools/sf-emit.sh" \
-      "$HOME/.claude/skills/superflow/tools/sf-emit.sh" \
-      "$HOME/.codex/skills/superflow/tools/sf-emit.sh" \
-      "$HOME/.agents/skills/superflow/tools/sf-emit.sh"; do
-    if [ -f "$_sf_path" ]; then source "$_sf_path"; break; fi
-  done
-  command -v sf_emit >/dev/null 2>&1 || sf_emit() { return 0; }
-fi
-if [ -z "${SUPERFLOW_RUN_ID:-}" ] && [ -f .superflow-state.json ]; then
-  SUPERFLOW_RUN_ID=$(python3 -c 'import json; print(json.load(open(".superflow-state.json")).get("context",{}).get("run_id",""))' 2>/dev/null)
-  [ -n "$SUPERFLOW_RUN_ID" ] && export SUPERFLOW_RUN_ID
-fi
-# If run_id still unavailable after best-effort restore, install no-op to avoid set -e aborts
-if [ -z "${SUPERFLOW_RUN_ID:-}" ]; then
-  sf_emit() { return 0; }
-fi
-```
-
 This file is re-read after context compaction. Re-read it if you lose context.
 
 **State at entry:** phase=0, stage="completion", stage_index=4
@@ -46,9 +22,6 @@ TaskCreate(
 )
 ```
 
-```bash
-sf_emit stage.start stage=completion phase:int=0
-```
 
 ---
 
@@ -228,7 +201,3 @@ Walk through each item. If any is unchecked, go back to the relevant stage and c
 
 All items checked → Phase 0 is complete.
 
-```bash
-sf_emit stage.end stage=completion phase:int=0
-sf_emit phase.end phase:int=0 label="Onboarding"
-```

@@ -2,6 +2,17 @@
 
 All notable changes to superflow will be documented in this file.
 
+## 5.4.0 — 2026-07-11
+
+Field-audit fixes (single-operator POS deployment, one month of production runs):
+
+- **Deploy sync**: startup now ALWAYS overwrites `~/.claude/agents/*.md`, `~/.claude/rules/superflow-enforcement.md`, and `~/.codex/agents/*.toml` (was copy-if-missing → weeks-long drift between skill source and deployed agents, stale model pins).
+- **Event telemetry stack removed**: `tools/sf-emit.sh`, `templates/event-schema.json`, `hooks/precompact-state-externalization.sh`, Rule 13, step 4b, and all `sf_emit` calls in phase docs. One month / 11 merged sprints of real usage produced zero `events.jsonl` lines — the stack was pure overhead. `.superflow-state.json` remains the single source of truth.
+- **New git workflow mode `local_commit`**: for repos with no GitHub CI remote (backup-only). No PRs; the Rule 3 gate (dual review + PAR + docs) is the merge gate; local merge to main + push to backup remote. Codifies what real runs on such repos already did; Rules 2/8/8a and git-workflow-modes.md updated.
+- **State isolation (Rule 2b)**: state file lives in the project root; never write another project's state; re-read before overwrite. Response to the documented shared-state collision between concurrent runs.
+- **PostCompact hook fix** (deployment): heartbeat is now merge-updated instead of replaced — the old hook wiped `must_reread` on every compaction, defeating Rule 12.
+- Startup checklist renumbered (duplicate step numbers removed), banner simplified to one line, `aider` secondary detection dropped.
+
 ## Deferred (Sprint 3 → future)
 
 MEDIUM/LOW event-log gaps identified in Sprint 3 coverage audit; not in scope for this sprint:

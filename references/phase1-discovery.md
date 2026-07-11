@@ -1,29 +1,5 @@
 # Phase 1: Product Discovery (COLLABORATIVE)
 
-```bash
-# Event emission preloader — idempotent, runs at top of every phase doc bash usage.
-# Tries (in order): already-sourced sf_emit → local tools/sf-emit.sh → runtime-aware paths → no-op.
-# Also restores SUPERFLOW_RUN_ID from state if unset.
-if ! command -v sf_emit >/dev/null 2>&1; then
-  for _sf_path in \
-      "./tools/sf-emit.sh" \
-      "$HOME/.claude/skills/superflow/tools/sf-emit.sh" \
-      "$HOME/.codex/skills/superflow/tools/sf-emit.sh" \
-      "$HOME/.agents/skills/superflow/tools/sf-emit.sh"; do
-    if [ -f "$_sf_path" ]; then source "$_sf_path"; break; fi
-  done
-  command -v sf_emit >/dev/null 2>&1 || sf_emit() { return 0; }
-fi
-if [ -z "${SUPERFLOW_RUN_ID:-}" ] && [ -f .superflow-state.json ]; then
-  SUPERFLOW_RUN_ID=$(python3 -c 'import json; print(json.load(open(".superflow-state.json")).get("context",{}).get("run_id",""))' 2>/dev/null)
-  [ -n "$SUPERFLOW_RUN_ID" ] && export SUPERFLOW_RUN_ID
-fi
-# If run_id still unavailable after best-effort restore, install no-op to avoid set -e aborts
-if [ -z "${SUPERFLOW_RUN_ID:-}" ]; then
-  sf_emit() { return 0; }
-fi
-```
-
 ## Stage Structure
 
 Phase 1 has 5 stages. Use TaskCreate at each stage start, TaskUpdate as todos complete.
@@ -74,7 +50,6 @@ s = json.load(open(p)) if os.path.exists(p) else {}
 s.update({'version':1,'phase':1,'phase_label':'Product Discovery','stage':'research','stage_index':0,'last_updated':datetime.datetime.now(datetime.timezone.utc).isoformat()})
 json.dump(s, open(p,'w'), indent=2)
 "
-sf_emit phase.start phase:int=1 label="Discovery"
 ```
 
 After each stage transition, update via python3:
@@ -108,9 +83,6 @@ TaskUpdate(id: <task_id>, status: "completed")
 
 ---
 
-```bash
-sf_emit stage.start stage=research phase:int=1
-```
 
 ## Step 1: Context Exploration
 <!-- Stage 1: Research, Todo 1 -->
@@ -198,10 +170,8 @@ Emit dispatch/complete pairs around each agent (repeat per agent, substituting r
 ```bash
 # Pattern for research agents (repeat per agent):
 AGENT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
-SF_PARENT_ID="$AGENT_ID" sf_emit agent.dispatch agent_type=research-agent task="Phase 1: domain best practices research" model=opus
 # Agent() call here (run_in_background: true)
 # After agent returns:
-sf_emit agent.complete role=research-agent agent_id="$AGENT_ID"
 ```
 
 ```
@@ -228,10 +198,6 @@ Wait for all background tasks to complete. If research yields insufficient resul
 
 Present a brief summary of research results to the user before brainstorming. Include product expert proposals. This ensures the user sees what was discovered and can steer the conversation.
 
-```bash
-sf_emit stage.end stage=research phase:int=1
-sf_emit stage.start stage=brainstorming phase:int=1
-```
 
 ## Step 5: Multi-Expert Brainstorming
 <!-- Stage 2: Brainstorming, Todo 1 -->
@@ -250,10 +216,8 @@ Dispatch all in parallel. Emit dispatch/complete pairs around each agent (repeat
 ```bash
 # Pattern for expert panel agents (repeat per agent):
 AGENT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
-SF_PARENT_ID="$AGENT_ID" sf_emit agent.dispatch agent_type=expert-panel task="Phase 1: Product GM brainstorm" model=opus
 # Agent() call here (run_in_background: true)
 # After agent returns:
-sf_emit agent.complete role=expert-panel agent_id="$AGENT_ID"
 ```
 
 ```
@@ -385,10 +349,6 @@ This summary is merged into the Product Summary in Step 7, so the user sees ever
 
 > **Reasoning:** Board Memo gives the panoramic view; Product Vision alignment gives the user a high-signal decision packet. One well-structured batch with recommendations and tradeoffs is faster and less error-prone than a long chain of dry clarification questions.
 
-```bash
-sf_emit stage.end stage=brainstorming phase:int=1
-sf_emit stage.start stage=product-approval phase:int=1
-```
 
 ## Step 7: Product Approval (MERGED GATE)
 <!-- Stage 3: Product Approval, Todos 1-2 -->
@@ -440,13 +400,8 @@ mcp__plugin_telegram_telegram__reply(chat_id: <chat_id from context>, text: "Pro
 - "restart" → go back to Step 5 (brainstorming)
 - User abandons / explicitly cancels Phase 1:
   ```bash
-  sf_emit run.end status=blocked
   ```
 
-```bash
-sf_emit stage.end stage=product-approval phase:int=1
-sf_emit stage.start stage=spec phase:int=1
-```
 
 ## Step 8: Spec Document
 <!-- Stage 4: Specification, Todo 1 -->
@@ -473,10 +428,6 @@ Create `docs/superflow/specs/` if it doesn't exist.
 
 Run two reviewers in parallel. Both reviewers receive the product brief AND the spec.
 
-```bash
-sf_emit review.start reviewer=product target="spec"
-sf_emit review.start reviewer=technical target="spec"
-```
 
 1. **Claude reviewer (PRODUCT lens)**: `Agent(subagent_type: "deep-product-reviewer", run_in_background: true, prompt: "Review this spec for product completeness, scope alignment, user story coverage. Spec: [SPEC TEXT]")`. Focus: product completeness, scope alignment, user story coverage.
 2. **Secondary provider (TECHNICAL lens)**: `$TIMEOUT_CMD 600 codex exec --full-auto -m gpt-5.5 -c model_reasoning_effort=high --ephemeral "Spec review. Check completeness, security, architecture against: [SPEC TEXT]" 2>&1` via Bash (`run_in_background: true`).
@@ -489,14 +440,8 @@ Both must return PASS to proceed.
 
 ```bash
 # VERDICT: one of APPROVE, ACCEPTED, PASS, FAIL, NEEDS_FIXES, REQUEST_CHANGES
-sf_emit review.verdict reviewer=product verdict="$VERDICT"
-sf_emit review.verdict reviewer=technical verdict="$VERDICT"
 ```
 
-```bash
-sf_emit stage.end stage=spec phase:int=1
-sf_emit stage.start stage=plan phase:int=1
-```
 
 ## Step 10: Implementation Plan
 <!-- Stage 5: Planning, Todo 1 -->
@@ -542,10 +487,6 @@ The orchestrator uses this to build a sprint dependency graph and dispatch indep
 
 Run two reviewers in parallel (same mechanism as Step 8):
 
-```bash
-sf_emit review.start reviewer=product target="plan"
-sf_emit review.start reviewer=technical target="plan"
-```
 
 1. **Claude reviewer (PRODUCT lens)**: `Agent(subagent_type: "standard-product-reviewer", run_in_background: true, prompt: "Review this plan for product feasibility, scope correctness, user value alignment. Plan: [PLAN TEXT]")`. Does the plan deliver user value? Is scope correct? Are priorities aligned with the brief?
 2. **Secondary provider (TECHNICAL lens)**: `$TIMEOUT_CMD 600 codex exec --full-auto -m gpt-5.5 -c model_reasoning_effort=high --ephemeral "Plan review. Check achievability, scoping, dependencies against: [PLAN TEXT]" 2>&1` via Bash (`run_in_background: true`). Are there missing tasks? Over-engineering? Does sprint ordering make sense?
@@ -557,14 +498,8 @@ Both must APPROVE. If either returns NEEDS_REVISION: fix, re-review.
 
 ```bash
 # VERDICT: one of APPROVE, ACCEPTED, PASS, FAIL, NEEDS_FIXES, REQUEST_CHANGES
-sf_emit review.verdict reviewer=product verdict="$VERDICT"
-sf_emit review.verdict reviewer=technical verdict="$VERDICT"
 ```
 
-```bash
-sf_emit stage.end stage=plan phase:int=1
-sf_emit stage.start stage=user-approval phase:int=1
-```
 
 ## Step 12: User Approval (FINAL GATE)
 <!-- Stage 5: Planning, Todo 4 -->
@@ -594,10 +529,6 @@ mcp__plugin_telegram_telegram__reply(chat_id: <chat_id from context>, text: "Imp
 - User says "go" / "start" / "давай" / affirmative → proceed to auto-launch flow below
 - User requests changes → update plan, re-present
 
-```bash
-sf_emit stage.end stage=user-approval phase:int=1
-sf_emit stage.start stage=charter phase:int=1
-```
 
 ## Step 13: Generate Autonomy Charter
 <!-- Stage 5: Planning, Todo 5 -->
@@ -634,9 +565,5 @@ After displaying the charter and confirming with the user, transition to Phase 2
 2. Tell the user:
    > "Plan approved. Phase 2 needs a fresh context for best quality.
    > Run `/clear` then `/superflow` — it will pick up from Phase 2 automatically."
-```bash
-sf_emit stage.end stage=charter phase:int=1
-sf_emit phase.end phase:int=1 label="Discovery"
-```
 
 3. Do NOT proceed to Phase 2 in the same session

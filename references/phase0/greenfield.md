@@ -1,29 +1,5 @@
 # Phase 0 — Greenfield Path
 
-```bash
-# Event emission preloader — idempotent, runs at top of every phase doc bash usage.
-# Tries (in order): already-sourced sf_emit → local tools/sf-emit.sh → runtime-aware paths → no-op.
-# Also restores SUPERFLOW_RUN_ID from state if unset.
-if ! command -v sf_emit >/dev/null 2>&1; then
-  for _sf_path in \
-      "./tools/sf-emit.sh" \
-      "$HOME/.claude/skills/superflow/tools/sf-emit.sh" \
-      "$HOME/.codex/skills/superflow/tools/sf-emit.sh" \
-      "$HOME/.agents/skills/superflow/tools/sf-emit.sh"; do
-    if [ -f "$_sf_path" ]; then source "$_sf_path"; break; fi
-  done
-  command -v sf_emit >/dev/null 2>&1 || sf_emit() { return 0; }
-fi
-if [ -z "${SUPERFLOW_RUN_ID:-}" ] && [ -f .superflow-state.json ]; then
-  SUPERFLOW_RUN_ID=$(python3 -c 'import json; print(json.load(open(".superflow-state.json")).get("context",{}).get("run_id",""))' 2>/dev/null)
-  [ -n "$SUPERFLOW_RUN_ID" ] && export SUPERFLOW_RUN_ID
-fi
-# If run_id still unavailable after best-effort restore, install no-op to avoid set -e aborts
-if [ -z "${SUPERFLOW_RUN_ID:-}" ]; then
-  sf_emit() { return 0; }
-fi
-```
-
 Loaded by Stage 1 when an empty or near-empty project is detected.
 After completing G6, rejoin at Stage 4 (skip Branch A — docs already created in G5).
 Run Branch B (permissions/hooks) and Branch C (scaffolding) only.
@@ -287,9 +263,6 @@ After greenfield scaffolding is complete:
 
 5. **After Stage 4 Branch B+C:** proceed to Stage 5 (references/phase0/stage5-completion.md).
 
-```bash
-sf_emit stage.end stage=greenfield phase:int=0
-```
 
 Phase 1 proceeds normally — the user describes what they want to build against the freshly
 scaffolded project.
@@ -310,9 +283,6 @@ On entry to greenfield path, update state:
 }
 ```
 
-```bash
-sf_emit stage.start stage=greenfield phase:int=0
-```
 
 After each step, update `stage_index` to reflect progress (G1=0, G2=1, G2.5=2, G3=3, G4=4,
 G5=5, G6=6). This enables crash recovery — if the session dies mid-scaffolding, the next run

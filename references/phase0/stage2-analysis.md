@@ -1,30 +1,6 @@
 # Phase 0 — Stage 2: Analysis
 <!-- Stage 2, Todos: dispatch 5 agents, wait, cross-check synthesis -->
 
-```bash
-# Event emission preloader — idempotent, runs at top of every phase doc bash usage.
-# Tries (in order): already-sourced sf_emit → local tools/sf-emit.sh → runtime-aware paths → no-op.
-# Also restores SUPERFLOW_RUN_ID from state if unset.
-if ! command -v sf_emit >/dev/null 2>&1; then
-  for _sf_path in \
-      "./tools/sf-emit.sh" \
-      "$HOME/.claude/skills/superflow/tools/sf-emit.sh" \
-      "$HOME/.codex/skills/superflow/tools/sf-emit.sh" \
-      "$HOME/.agents/skills/superflow/tools/sf-emit.sh"; do
-    if [ -f "$_sf_path" ]; then source "$_sf_path"; break; fi
-  done
-  command -v sf_emit >/dev/null 2>&1 || sf_emit() { return 0; }
-fi
-if [ -z "${SUPERFLOW_RUN_ID:-}" ] && [ -f .superflow-state.json ]; then
-  SUPERFLOW_RUN_ID=$(python3 -c 'import json; print(json.load(open(".superflow-state.json")).get("context",{}).get("run_id",""))' 2>/dev/null)
-  [ -n "$SUPERFLOW_RUN_ID" ] && export SUPERFLOW_RUN_ID
-fi
-# If run_id still unavailable after best-effort restore, install no-op to avoid set -e aborts
-if [ -z "${SUPERFLOW_RUN_ID:-}" ]; then
-  sf_emit() { return 0; }
-fi
-```
-
 Runs after Stage 1 confirms `$PREFLIGHT`. Dispatches 5 parallel specialized agents to audit the codebase, then cross-checks findings for consistency. Output is an internal evidence bundle saved to state for Stage 3.
 
 **All documentation output in English.** Communicate with the user in their language.
@@ -95,7 +71,6 @@ s['stage_index'] = 1
 s['last_updated'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 json.dump(s, open('.superflow-state.json', 'w'), indent=2)
 "
-sf_emit stage.start stage=analysis phase:int=0
 ```
 
 ---
@@ -109,11 +84,8 @@ Before dispatching each agent, emit a dispatch event and capture its ID for corr
 ```bash
 # Pattern for each agent (repeat per agent, substituting agent_type, task, model):
 AGENT_ID=$(uuidgen | tr '[:upper:]' '[:lower:]')
-SF_PARENT_ID="$AGENT_ID" sf_emit agent.dispatch agent_type=deep-analyst task="Phase 0: architecture analysis" model=opus
 # Agent() call here (run_in_background: true)
 # After agent returns:
-sf_emit agent.complete role=architecture-analyst agent_id="$AGENT_ID"
-# On failure instead: sf_emit agent.fail role=architecture-analyst agent_id="$AGENT_ID"
 ```
 
 ### Agent 1 — Architecture (deep-analyst)
@@ -292,9 +264,6 @@ The bundle is **not shown to the user yet** — Stage 3 (Proposal) reads it and 
 
 ## Completion
 
-```bash
-sf_emit stage.end stage=analysis phase:int=0
-```
 
 ```
 TaskUpdate(id: <task_id>, status: "completed")

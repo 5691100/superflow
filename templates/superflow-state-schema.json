@@ -200,7 +200,7 @@
         },
         "run_id": {
           "type": "string",
-          "description": "UUID generated at session start, persisted across compaction/resume. Corresponds to run_id field in event-schema.json envelope."
+          "description": "UUID generated at session start, persisted across compaction/resume."
         }
       }
     },
