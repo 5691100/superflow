@@ -244,6 +244,91 @@ fi
 echo ""
 
 # ---------------------------------------------------------------------------
+# Check 7: phase_gates.release_gate — node exists, step_files entry, file on disk
+# ---------------------------------------------------------------------------
+echo "[ Check 7: phase_gates.release_gate — node, step_files entry, file on disk ]"
+
+RG_NODE="$(jq -r '.phase_gates.release_gate // empty' "$WORKFLOW_JSON")"
+if [ -z "$RG_NODE" ]; then
+  fail "phase_gates.release_gate node is missing from workflow.json"
+else
+  pass "phase_gates.release_gate node exists"
+
+  # Verify step_files has an entry keyed "release_gate"
+  RG_STEP_FILE="$(jq -r '.step_files.release_gate // empty' "$WORKFLOW_JSON")"
+  if [ -z "$RG_STEP_FILE" ]; then
+    fail "step_files[\"release_gate\"] is missing (release_gate node exists but has no step_files entry)"
+  else
+    pass "step_files[\"release_gate\"] = \"${RG_STEP_FILE}\""
+
+    # Verify the step file exists on disk
+    RG_FILE_PATH="${STEPS_DIR}/${RG_STEP_FILE}"
+    if [ ! -f "$RG_FILE_PATH" ]; then
+      fail "release_gate step file not found on disk: ${RG_STEP_FILE} (expected at ${RG_FILE_PATH})"
+    else
+      pass "release_gate step file exists on disk: ${RG_STEP_FILE}"
+    fi
+  fi
+
+  # Verify mandatory node fields — existence AND semantic values
+  RG_WHEN="$(echo "$RG_NODE" | jq -r '.when // empty')"
+  if [ -z "$RG_WHEN" ]; then
+    fail "phase_gates.release_gate is missing 'when' field"
+  else
+    pass "release_gate.when = \"${RG_WHEN}\""
+    # Semantic: must indicate post-sprint-loop / pre-completion ordering
+    if echo "$RG_WHEN" | grep -q "post-sprint-loop"; then
+      pass "release_gate.when contains 'post-sprint-loop' (correct ordering)"
+    else
+      fail "release_gate.when must contain 'post-sprint-loop' (got: \"${RG_WHEN}\")"
+    fi
+    if echo "$RG_WHEN" | grep -q "pre-completion"; then
+      pass "release_gate.when contains 'pre-completion' (correct ordering)"
+    else
+      fail "release_gate.when must contain 'pre-completion' (got: \"${RG_WHEN}\")"
+    fi
+  fi
+
+  # Semantic: mandatory_for must include web AND backend-only
+  if echo "$RG_NODE" | jq -e '(.mandatory_for | type) == "array"' >/dev/null 2>&1; then
+    if echo "$RG_NODE" | jq -e '.mandatory_for | index("web") != null' >/dev/null 2>&1; then
+      pass "release_gate.mandatory_for includes 'web'"
+    else
+      fail "release_gate.mandatory_for must include 'web' (gate is mandatory for web projects)"
+    fi
+    if echo "$RG_NODE" | jq -e '.mandatory_for | index("backend-only") != null' >/dev/null 2>&1; then
+      pass "release_gate.mandatory_for includes 'backend-only'"
+    else
+      fail "release_gate.mandatory_for must include 'backend-only'"
+    fi
+  else
+    fail "release_gate.mandatory_for must be a JSON array"
+  fi
+
+  # Semantic: skipped_for must include library AND must NOT include web or backend-only
+  if echo "$RG_NODE" | jq -e '(.skipped_for | type) == "array"' >/dev/null 2>&1; then
+    if echo "$RG_NODE" | jq -e '.skipped_for | index("library") != null' >/dev/null 2>&1; then
+      pass "release_gate.skipped_for includes 'library'"
+    else
+      fail "release_gate.skipped_for must include 'library'"
+    fi
+    if echo "$RG_NODE" | jq -e '.skipped_for | index("web") != null' >/dev/null 2>&1; then
+      fail "DANGER: release_gate.skipped_for includes 'web' — gate would be skipped for web projects"
+    else
+      pass "release_gate.skipped_for does NOT include 'web' (correct)"
+    fi
+    if echo "$RG_NODE" | jq -e '.skipped_for | index("backend-only") != null' >/dev/null 2>&1; then
+      fail "DANGER: release_gate.skipped_for includes 'backend-only' — gate would be skipped for backend-only projects"
+    else
+      pass "release_gate.skipped_for does NOT include 'backend-only' (correct)"
+    fi
+  else
+    fail "release_gate.skipped_for must be a JSON array"
+  fi
+fi
+echo ""
+
+# ---------------------------------------------------------------------------
 # Section: Per-combination step sequences (9 cells × walkthrough)
 # ---------------------------------------------------------------------------
 echo "================================================================"

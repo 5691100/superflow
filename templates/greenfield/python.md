@@ -45,9 +45,6 @@ dist/
 *.egg-info/
 .worktrees/
 .superflow/
-# Explicit entries for event log artifacts (redundant with .superflow/ above, kept for self-documentation).
-.superflow/events.jsonl
-.superflow/archive/
 .superflow-state.json
 CLAUDE.local.md
 ```

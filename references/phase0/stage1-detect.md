@@ -63,7 +63,13 @@ os.replace(tmp, p)
 
 ## Step 2: Parallel Preflight Detection
 
-Run ALL detection commands simultaneously via Bash (no sequential waits):
+Run ALL detection commands simultaneously via Bash (no sequential waits). Include the test-infra detection helper as one of the parallel commands:
+
+```bash
+# Test-infra detection — run in parallel with the other probes below.
+# Writes .superflow/test-env.json (atomic, idempotent, read-only). Requires: bash, jq. Never installs anything.
+bash tools/detect-test-env.sh 2>/dev/null || true
+```
 
 ```bash
 # Markers (check local first, then main branch as fallback)
@@ -169,7 +175,7 @@ If no response within a reasonable time (non-interactive mode), proceed with `co
 ## Step 6: Handle Response
 
 ### "confirm" (or auto)
-Persist `$PREFLIGHT` to state and advance stage:
+Persist `$PREFLIGHT` to state and advance stage. **Merge into `context` — never assign `s['context']` wholesale**, or you destroy `context.run_id`/`context.runtime` set by SKILL.md (state-recovery keys):
 
 ```bash
 python3 -c "
@@ -177,14 +183,13 @@ import json, datetime
 s = json.load(open('.superflow-state.json'))
 s['stage'] = 'detect'
 pf = $PREFLIGHT_JSON
-s['context'] = {
-    'preflight': pf,
-    'user_context': {
-        'team': 'solo' if int(pf.get('team_size','1')) <= 1 else 'small_team',
-        'experience': 'intermediate',
-        'ci': pf.get('ci','no'),
-        'dismissed': False
-    }
+ctx = s.setdefault('context', {})  # preserve existing keys (run_id, runtime, ...)
+ctx['preflight'] = pf
+ctx['user_context'] = {
+    'team': 'solo' if int(pf.get('team_size','1')) <= 1 else 'small_team',
+    'experience': 'intermediate',
+    'ci': pf.get('ci','no'),
+    'dismissed': False
 }
 s['last_updated'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 json.dump(s, open('.superflow-state.json', 'w'), indent=2)
@@ -223,7 +228,7 @@ echo "$MARKER" >> docs/superflow/project-health-report.md
 git check-ignore -q .worktrees 2>/dev/null || echo ".worktrees/" >> .gitignore
 git check-ignore -q .superflow-state.json 2>/dev/null || echo ".superflow-state.json" >> .gitignore
 
-# Update state
+# Update state — merge into context (preserve run_id and other SKILL.md keys)
 python3 -c "
 import json, datetime
 s = json.load(open('.superflow-state.json'))
@@ -231,7 +236,9 @@ s['phase'] = 1
 s['phase_label'] = 'Product Discovery'
 s['stage'] = 'research'
 s['stage_index'] = 0
-s['context'] = {'preflight': {'skipped': True}, 'skip_phase0': True}
+ctx = s.setdefault('context', {})
+ctx['preflight'] = {'skipped': True}
+ctx['skip_phase0'] = True
 s['last_updated'] = datetime.datetime.now(datetime.timezone.utc).isoformat()
 json.dump(s, open('.superflow-state.json', 'w'), indent=2)
 "

@@ -19,10 +19,12 @@ complete before this stage). Required fields:
 - `technical_review` — technical review verdict
 - `docs_update` — `"UPDATED"` or `"UNCHANGED"`
 - `docs_review` — `"PASS"`
-- `provider` — `"codex"`, `"split-focus"`, etc.
+- `provider` — `"codex"`, `"code-review-skill"`, `"split-focus"`, or `"workflow-review"`
+- `criteria` — (mandatory, Rule 3a) per-criterion PASS/FAIL table mirroring the sprint contract's `criteria.id` set, e.g. `{"C01":"PASS","C02":"PASS"}`. Unified Review verifies the contract (`docs/superflow/contracts/<date>-<feature>.contract.yml`) criterion-by-criterion; this is the audit trail, not one fuzzy verdict. See `references/contract-gate.md`.
 - `ts` — ISO timestamp
+- `release_gate` — (optional per sprint; **required in the final pre-Phase-3 evidence**) — `"PASS"`, `"SKIPPED"`, or `"FAIL"`. Copied from `.superflow/release-gate/verdict.json` after the gate runs (post-sprint-loop, pre-completion-report). Per-sprint PAR may omit this field; the Phase 3 gate reads `verdict.json` directly (authoritative) and expects `release_gate` in the final `.par-evidence.json` as an audit trail.
 
-Standard/critical sprint example:
+Standard/critical sprint example (mid-run — no release_gate yet):
 
 ```json
 {
@@ -35,6 +37,26 @@ Standard/critical sprint example:
   "docs_update": "UPDATED",
   "docs_review": "PASS",
   "provider": "codex",
+  "criteria": {"C01": "PASS", "C02": "PASS", "C03": "PASS"},
+  "ts": "2026-01-01T00:00:00Z"
+}
+```
+
+Final pre-Phase-3 evidence (after release gate runs — `release_gate` required):
+
+```json
+{
+  "sprint": 3,
+  "governance": "standard",
+  "complexity": "medium",
+  "par_skip_product": false,
+  "claude_product": "ACCEPTED",
+  "technical_review": "APPROVE",
+  "docs_update": "UPDATED",
+  "docs_review": "PASS",
+  "provider": "codex",
+  "criteria": {"C01": "PASS", "C02": "PASS", "C03": "PASS"},
+  "release_gate": "PASS",
   "ts": "2026-01-01T00:00:00Z"
 }
 ```
@@ -52,12 +74,71 @@ Light governance sprint example (`par_skip_product: true`):
   "docs_update": "UNCHANGED",
   "docs_review": "PASS",
   "provider": "split-focus",
+  "criteria": {"C01": "PASS"},
   "ts": "2026-01-01T00:00:00Z"
 }
 ```
 
+Even a light-mode sprint carries its contract's criteria — a single-criterion contract still
+records that one entry (`criteria` is never empty; Rule 3a).
+
 `claude_product: "SKIPPED"` is ONLY valid when `par_skip_product: true` AND `governance: "light"`.
 For standard or critical sprints, regardless of complexity, `claude_product` MUST be `"ACCEPTED"`.
+
+## Mechanical Assembly from Verdict Blocks
+
+`.par-evidence.json` is assembled mechanically from the reviewers' fenced JSON verdict blocks
+(see `review-unified.md` § Verdict Contract) — never from prose. Extract each verdict, then build
+the file with jq:
+
+```bash
+extract_verdict() {  # $1 = file holding the reviewer's final message
+  awk '/^```json$/{f=1; buf=""; next} /^```/{f=0; next} f{buf=buf $0 ORS} END{printf "%s", buf}' \
+    "$1" | jq -r '.verdict'
+}
+
+PRODUCT=$(extract_verdict product-review.txt)   # use "SKIPPED" when par_skip_product+light
+TECH=$(extract_verdict technical-review.txt)
+# CRITERIA_JSON — per-criterion PASS/FAIL table built from the contract verification (Rule 3a),
+# e.g. '{"C01":"PASS","C02":"PASS"}'. Assembled from the reviewers' criterion checks. MUST be
+# non-empty for EVERY sprint (standard, critical, AND light — a light-mode single-criterion
+# contract still carries its one entry). An empty table means the contract was not verified.
+
+# Rule 3a guard: refuse to assemble evidence with an empty criteria table.
+# (The -z check short-circuits before jq, so CRITERIA_JSON is guaranteed non-empty here.)
+if [ -z "${CRITERIA_JSON:-}" ] || \
+   [ "$(jq -n --argjson c "$CRITERIA_JSON" '$c | length')" -eq 0 ]; then
+  echo "FATAL: criteria table is empty — Rule 3a requires a per-criterion PASS/FAIL table" \
+       "from the sprint contract (light-mode single-criterion contracts included)." >&2
+  exit 1
+fi
+
+jq -n \
+  --argjson sprint "$SPRINT_NUM" \
+  --arg governance "$GOVERNANCE" \
+  --arg complexity "$COMPLEXITY" \
+  --argjson skip "$PAR_SKIP_PRODUCT" \
+  --arg product "$PRODUCT" \
+  --arg tech "$TECH" \
+  --arg docs_update "$DOCS_UPDATE" \
+  --arg docs_review "$DOCS_REVIEW" \
+  --arg provider "$PROVIDER" \
+  --argjson criteria "$CRITERIA_JSON" \
+  '{sprint: $sprint, governance: $governance, complexity: $complexity,
+    par_skip_product: $skip, claude_product: $product, technical_review: $tech,
+    docs_update: $docs_update, docs_review: $docs_review, provider: $provider,
+    criteria: $criteria, ts: (now | todate)}' > .par-evidence.json
+```
+
+If a reviewer's message has no parseable verdict block, that is not a verdict — re-engage the
+reviewer (SendMessage, see `review-unified.md`) for the block instead of inferring one from prose.
+
+Workflow path: when review ran via the saved `/superflow-review` workflow, `product` and
+`technical` in the return value are full verdict objects (same shape as the fenced-JSON block).
+Evidence fields take the `.verdict` string — e.g. `PRODUCT=$(jq -r '.product.verdict' <<<"$WF_RESULT")`,
+`TECH=$(jq -r '.technical.verdict' <<<"$WF_RESULT")`. Skip `extract_verdict` and record
+`provider: "workflow-review"`. When `product:false` was passed, `product` is `null` — set
+`PRODUCT="SKIPPED"` directly.
 
 ## Verdict Mapping
 
@@ -71,11 +152,19 @@ If any agent returned issues, fix and re-run that agent before writing `.par-evi
 
 ## No Secondary Provider
 
-When Codex/secondary unavailable, split-focus fallback:
-- Agent A (Product): `standard-product-reviewer` — spec fit, user scenarios, data integrity
-- Agent B (Technical): `standard-code-reviewer` — correctness, security, architecture
+Technical-lens fallback chain when `codex exec review` is unavailable:
 
-Record: `{"provider":"split-focus","claude_product":"ACCEPTED","technical_review":"APPROVE",...}`
+1. **Native `/code-review` skill** — invoke via the Skill tool at `high` effort (technical lens only). Record `provider: "code-review-skill"`.
+2. **Split-focus Claude agents** (last resort when Skill tool also unavailable):
+   - Agent A (Product): `standard-product-reviewer` — spec fit, user scenarios, data integrity
+   - Agent B (Technical): `standard-code-reviewer` — correctness, security, architecture
+   Record `provider: "split-focus"`.
+
+Examples:
+- Codex → `{"provider":"codex","claude_product":"ACCEPTED","technical_review":"APPROVE",...}`
+- /code-review skill → `{"provider":"code-review-skill","claude_product":"ACCEPTED","technical_review":"APPROVE",...}`
+- Split-focus → `{"provider":"split-focus","claude_product":"ACCEPTED","technical_review":"APPROVE",...}`
+- /superflow-review workflow → `{"provider":"workflow-review","claude_product":"ACCEPTED","technical_review":"APPROVE",...}`
 
 ## Gate Before `gh pr create`
 

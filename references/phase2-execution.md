@@ -37,3 +37,19 @@ Defined in full in `workflow.json` → `stages[]`. Step files (all in `reference
 | Push, PR creation, CI wait, cleanup | `ship-pr.md` |
 | Compaction recovery | `compaction-recovery.md` |
 | Holistic review (conditional) | `holistic-review.md` |
+
+## Post-Sprint-Loop Ordering
+
+After all sprints and the optional Holistic Review, BEFORE the Completion Report and Phase 3,
+run the **Release Gate** (`phase_gates.release_gate` in `workflow.json`):
+
+```
+sprint loop → holistic review (if required) → RELEASE GATE → Completion Report → Phase 3
+```
+
+Load `references/phase2/steps/release-gate.md` at this boundary. The gate writes
+`.superflow/release-gate/verdict.json`. The gate is BINDING (blocks Phase 3 merge unless
+`verdict=PASS`/`SKIPPED`) only when infra is ready, the charter defines `test_strategy` journeys,
+and a test suite exists (enforcement Rule 14); otherwise — the default on this POS, and always in
+`local_commit` mode — it is ADVISORY and does NOT block the merge. See
+`references/phase2/overview.md` § Post-Sprint-Loop: Release Gate for details.

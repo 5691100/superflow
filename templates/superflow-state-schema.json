@@ -184,10 +184,16 @@
             "sprint_pr_queue",
             "stacked_prs",
             "parallel_wave_prs",
-            "trunk_based"
+            "trunk_based",
+            "local_commit"
           ],
           "default": "sprint_pr_queue",
           "description": "Branch, PR, and merge workflow selected in Phase 1"
+        },
+        "use_workflows": {
+          "type": "boolean",
+          "default": true,
+          "description": "Opt-in for saved multi-agent workflows (/superflow-review, /superflow-wave) in Phase 2; Claude runtime only"
         },
         "runtime": {
           "type": "string",

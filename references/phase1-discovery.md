@@ -510,6 +510,7 @@ Present the complete plan overview:
 - Sprint breakdown with task counts and complexity tags
 - Key files touched per sprint
 - Selected git workflow mode and why it fits this task
+- **Workflows opt-in** (Claude runtime only — omit this line on Codex runtime). State verbatim: "Autonomous execution will use saved multi-agent workflows for review fan-out and parallel waves (recommended). Heads-up: depending on permission mode, the FIRST workflow launch may show one approval prompt (Auto mode: first launch only; default mode: every launch — consider switching to Auto for Phase 2). Say no-workflows to use plain subagent dispatch." User objection ("no-workflows") → `use_workflows=false`. This recorded opt-in is what justifies the orchestrator invoking saved workflows during Phase 2. See `references/workflow-orchestration.md`.
 - **Sprint wave plan** — show which sprints run in parallel:
   ```
   Wave 1: [Sprint 1, Sprint 2, Sprint 6] — parallel (independent files)
@@ -529,11 +530,40 @@ mcp__plugin_telegram_telegram__reply(chat_id: <chat_id from context>, text: "Imp
 - User says "go" / "start" / "давай" / affirmative → proceed to auto-launch flow below
 - User requests changes → update plan, re-present
 
+After approval, record the workflows opt-in decision in state (default `True`; `False` if the user said "no-workflows"; always `False` on Codex runtime):
+```bash
+python3 -c "import json,datetime; s=json.load(open('.superflow-state.json')); s.setdefault('context',{})['use_workflows']=USE_WORKFLOWS; s['last_updated']=datetime.datetime.now(datetime.timezone.utc).isoformat(); json.dump(s,open('.superflow-state.json','w'),indent=2)"
+```
+Replace `USE_WORKFLOWS` with the Python literal `True` or `False`.
+
 
 ## Step 13: Generate Autonomy Charter
 <!-- Stage 5: Planning, Todo 5 -->
 
 After user approval and before auto-launch, generate an Autonomy Charter from the brief, spec, and plan. Include the selected governance mode from Step 2 and git workflow mode from Step 2b:
+
+### Step 13a: Build the Test Strategy
+
+Before writing the charter YAML, derive the Test Strategy using `prompts/test-strategy.md`.
+
+Read `.superflow/test-env.json` (written by Phase 0 `tools/detect-test-env.sh`). If the file is absent (Phase 0 was skipped or detection failed), treat `project_type` as `web` and all readiness flags as `false`.
+
+Use `project_type` and the readiness flags to determine which levels apply and whether journeys are required:
+- **`web`**: unit + integration + E2E levels; ≥1 critical journey per major user-facing flow.
+- **`backend-only`**: unit + integration levels; no browser journeys.
+- **`library`**: unit level only; coverage threshold + runtime-version matrix; no journeys.
+
+**Critical constraint — owning sprint assignment:** Every journey MUST be assigned to exactly one `owning_sprint`. That sprint's plan acceptance (from Step 10) must explicitly require authoring the journey's executable spec (`*.spec.ts` / `test_*.py`). A charter with an unowned journey — or a journey whose owning sprint has no spec-authoring acceptance clause — is incomplete and (when the Release Gate is binding — enforcement Rule 14) will cause the Phase 3 Release Gate to report FAIL vacuously.
+
+**MUST — validate before writing the charter file:** Verify every journey's `owning_sprint` is a positive integer (≥1) matching an existing sprint in the Step 10 plan. No journey may keep `owning_sprint: 0` (placeholder) or reference a non-existent sprint.
+
+**Journeys → scenarios handoff chain:**
+1. **Phase 1 (here):** each journey gets a stable `spec_tag` (e.g. `J1-login`) and an `owning_sprint` pointing to the sprint that will author the executable spec.
+2. **Phase 2 sprint execution:** the `owning_sprint` implementer MUST author the spec file at `spec_path` and annotate the test with the exact `spec_tag` (e.g. `test('user signs in @J1-login', ...)`). The sprint's acceptance criteria must explicitly require this.
+3. **Phase 2 Release Gate (post-sprint-loop, when binding):** the orchestrator reads the charter's `test_strategy.journeys` block, emits `journeys.json` (a JSON array of journey objects, each carrying a unique `spec_tag`), runs Playwright with `--reporter=json`, extracts per-spec `spec_tag`, and checks every journey's `spec_tag` appears in the covered (green) set. When infra/test-strategy/suite are absent the gate is advisory (Rule 14).
+4. **Phase 3 pre-merge:** in the binding case, refuses merge unless `verdict.json` holds `verdict=PASS` (or `SKIPPED` for library); otherwise advisory. See `references/phase3-merge.md`.
+
+The computed `test_strategy` block is included in the charter YAML frontmatter (see template below) and a narrative "## Test Strategy" section is included in the charter body.
 
 **Charter structure** (YAML frontmatter + Markdown body):
 
@@ -547,11 +577,35 @@ success_criteria:
   - "Measurable outcome 1 (from brief success criteria)"
   - "Measurable outcome 2"
 governance_mode: "light|standard|critical"  # from Step 2 selection
-git_workflow_mode: "solo_single_pr|sprint_pr_queue|stacked_prs|parallel_wave_prs|trunk_based"  # from Step 2b selection
+git_workflow_mode: "solo_single_pr|sprint_pr_queue|stacked_prs|parallel_wave_prs|trunk_based|local_commit"  # from Step 2b selection
+use_workflows: true|false  # from Step 12 opt-in; allows saved /superflow-review and /superflow-wave workflows in Phase 2 (Claude runtime only)
+test_strategy:             # built in Step 13a; see prompts/test-strategy.md
+  levels:                  # always emit all three keys — see prompts/test-strategy.md for value conventions
+    unit: "<runner + test directory — e.g. 'vitest (tests/unit/)'>"
+    integration: "<runner + Docker — or 'N/A — library; no external services' if type-inactive; 'not configured — <install cmd>' if applicable but missing>"
+    e2e: "<Playwright or Cypress + browser — or 'N/A — library; no browser' / 'N/A — backend-only; no browser' if type-inactive>"
+  journeys:                # [] for library and backend-only; ≥1 per major user flow for web
+    - id: "J1-<slug>"     # stable kebab ID — NEVER rename after assignment (Release Gate matches on this)
+      title: "<Short journey name>"
+      steps:
+        - "<Step 1 — what user clicks or types>"
+        - "<Step 2>"
+      expected_outcome: "<Observable result when all steps succeed>"
+      spec_path: "<relative path — e.g. e2e/checkout.spec.ts>"
+      spec_title: "<test title including spec_tag annotation — e.g. 'user signs in @J1-login'>"
+      spec_tag: "J1-<slug>"  # equals the journey id; implementer annotates the spec with this tag; Release Gate matches per-journey coverage output by spec_tag
+      owning_sprint: 2     # positive integer (>=1) matching an existing sprint in the Step 10 plan — MUST NOT be 0
+  coverage:                # library path only — omit for web and backend-only
+    threshold: 80          # minimum line coverage %
+    tool: "<vitest --coverage (v8) / pytest-cov>"
+  runtime_matrix:          # library path only — omit for web and backend-only
+    - label: "<Node 20 LTS>"
+      version: "<20>"
+  per_sprint_acceptance: "<Per-sprint evidence: unit sprints paste runner output; journey-owning sprints paste playwright test <spec_path> output and confirm spec_tag in output; library sprints paste coverage % >= threshold>"
 ---
 ```
 
-**Body:** Free-form notes on scope boundaries, forbidden approaches, risk areas, and branch/PR policy for the selected git workflow mode.
+**Body:** Free-form notes on scope boundaries, forbidden approaches, risk areas, and branch/PR policy for the selected git workflow mode. Include a **## Test Strategy** section that narrates the active test levels, lists each journey with its steps and sprint ownership, states per-sprint acceptance for journey specs, and (for libraries) states the coverage threshold and runtime matrix.
 
 Save to `docs/superflow/specs/YYYY-MM-DD-<topic>-charter.md`. Update `.superflow-state.json` context with `charter_file` path.
 

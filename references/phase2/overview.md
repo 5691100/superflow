@@ -44,12 +44,13 @@ Sprint complexity tag in the plan drives implementer tier:
 | Complexity | Agent | Model | Effort | When |
 |-----------|-------|-------|--------|------|
 | simple | fast-implementer | opus | low | 1-2 files, CRUD/template, <50 lines |
-| medium | standard-implementer | opus | medium | 2-5 files, some new logic. Default if untagged. |
-| complex | deep-implementer | opus | high | 5+ files, new architecture, security-sensitive |
+| medium | standard-implementer | opus | high | 2-5 files, some new logic. Default if untagged. |
+| complex | deep-implementer | opus | max | 5+ files, new architecture, security-sensitive |
 
-**ALWAYS pass `model: "opus"` explicitly** in Agent() calls for implementers and doc-writers.
-Agent definition frontmatter `model:` is NOT reliably inherited — without it, subagents inherit
-the parent's model (Opus), wasting tokens on tasks Sonnet handles equally well.
+**ALWAYS pass `model: "opus"` explicitly** in every Agent() call (owner directive 2026-06-06:
+ALL agents run on plain `opus`). Agent definition frontmatter `model:` is NOT reliably inherited —
+a forgotten `model:` silently inherits the orchestrator's session model. Depth is differentiated by
+effort (deep = max, standard = high, fast = low), set in agent frontmatter — never by a weaker model.
 
 ---
 
@@ -58,6 +59,8 @@ the parent's model (Opus), wasting tokens on tasks Sonnet handles equally well.
 The orchestrator does NOT Read/Grep/Glob source files larger than 50 lines. Allowed direct tools:
 - **Bash for status:** `git status`, `git log`, `gh run list`, `gh pr view`, `ls`, `pwd`, `date`
 - **Bash for state I/O:** `.superflow-state.json`, `.par-evidence.json`, CHANGELOG appends
+- **Bash for testcontainer hygiene:** `bash $SUPERFLOW_SKILL_ROOT/tools/cleanup-testcontainers.sh`
+  — this exact helper invocation only; raw `docker` commands stay outside the budget
 - **Read for short files (<50 lines):** state files, `package.json`, the current sprint plan section
 - **TaskCreate / TaskUpdate** for stage tracking
 - **Agent (Task) tool** to dispatch subagents
@@ -67,3 +70,49 @@ and `superflow-enforcement.md` — these are orchestration files, not source fil
 
 For everything else — code reading, test failure diagnosis, directory exploration — dispatch
 `deep-analyst` and take a <2k-token summary back.
+
+For saved multi-agent Workflow usage (opt-in `/superflow-review` and `/superflow-wave`, the
+`context.use_workflows` flag, availability checks, fallbacks), see
+`references/workflow-orchestration.md` — the single authority on Workflow usage inside Superflow.
+
+---
+
+## Post-Sprint-Loop: Release Gate (adaptive — enforcement Rule 14)
+
+After ALL sprints are done and the optional Holistic Review completes, BEFORE the Completion
+Report and Phase 3, run the Release Gate — **but its blocking power is conditional**:
+
+1. **Read `references/phase2/steps/release-gate.md`** — full stage instructions.
+2. **Run the gate** (`phase_gates.release_gate` in `workflow.json`): boot the assembled app, run
+   integration + headless E2E, extract per-journey outcomes, call `tools/release-gate.sh` to compute
+   and persist `.superflow/release-gate/verdict.json`.
+3. **Binding vs advisory.** The gate BLOCKS Phase 3 only when ALL hold: `.superflow/test-env.json`
+   shows infra ready (docker/browsers), the charter defines `test_strategy` journeys, and a
+   Playwright/test suite exists. Then Phase 3 refuses merge unless `verdict=PASS` (or `SKIPPED` for
+   `project_type=library`); FAIL → fix and re-run. **Otherwise** (infra absent — the default on this
+   POS, and always in `local_commit` mode) the gate records `WARN`/`SKIPPED` as ADVISORY and does
+   NOT block the merge; the sprint contract's browser/artifact evaluator pass remains binding.
+4. **No-vacuous-pass invariant (binding case):** a web project with charter journeys and
+   `specs_ran=false` → verdict=FAIL regardless of other results. Zero execution is not zero failures.
+
+**Ordering (canonical):**
+```
+sprint loop → holistic review (if required) → RELEASE GATE (advisory unless binding) → Completion Report → Phase 3
+```
+
+---
+
+## Testcontainers Cleanup Discipline
+
+- **Ryuk enabled by default — two-case exception, implementer duty.** Ryuk must stay enabled except
+  when (a) `process.env.CI === 'true'`, or (b) `docker.ryuk_forced_disabled=true` in
+  `.superflow/test-env.json` (rootless Podman detected by Phase 0). In case (b),
+  `tools/cleanup-testcontainers.sh` is a mandatory backstop before and after integration tests. This
+  hygiene duty lives in the implementer agent definitions (`agents/*-implementer.md`). Never set the
+  variable globally in shell profiles or `.env` — stale containers accumulate silently.
+- **After every integration test run** the orchestrator runs ONLY the helper:
+  ```bash
+  bash $SUPERFLOW_SKILL_ROOT/tools/cleanup-testcontainers.sh
+  ```
+  It is label-based (`docker ps -aq --filter "label=org.testcontainers=true"`). Name-regex matching
+  is FORBIDDEN. Raw `docker` commands stay outside the orchestrator budget (Rule 11).

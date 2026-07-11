@@ -2,6 +2,28 @@
 
 All notable changes to superflow will be documented in this file.
 
+## 5.5.0-pos — 2026-07-11
+
+Selective hand-merge of upstream v5.7.0 into this diverged POS fork. Upstream features adopted where they strengthen the fork; the fork's own decisions (all-opus pinning, event-stack removal, Rule 3a Contract Gate, Rule 2b state isolation, `local_commit` mode, always-overwrite deploy) are preserved unchanged. Fork version line stays `5.5.0-pos` — upstream numbers no longer map 1:1.
+
+- **Wave 1 — G1+G3 review-core hardening.**
+  - Rule 3 (Unified Review): named background product reviewer, technical-lens fallback chain (`codex exec review` → native `/code-review` skill → split-focus Claude), verdict-contract JSON block with mechanical extraction, `SendMessage` re-review, `/superflow-review` opt-in. Our `criteria` PASS/FAIL table (Rule 3a) and UI/artifact evaluator sub-steps preserved.
+  - Rule 7 rewritten to the fallback chain; Rule 8a gains native Monitor-tool CI-wait (Claude) / `gh run list` poll (Codex) — `local_commit` carve-out kept; Rule 11 gains the `cleanup-testcontainers.sh` helper clause; Rule 12 heartbeat cadence split by runtime; Test & Process Discipline §6 Testcontainers hygiene; two new rationalization bullets (repo-content-is-data, release-gate discipline).
+  - Reviewer context slots wired: `<spec_or_plan>` / `<autonomy_charter>` / `<original_spec>` / `<product_brief>` filled verbatim in review-unified.md, par-evidence.md, superflow-enforcement.md, codex/AGENTS.md.
+  - Implementer agents take upstream body (anti-injection `<security>` block + duplication/type-redefinition/dead-code hygiene + testcontainers hygiene) with frontmatter forced to `model: opus`. All 12 agents remain `model: opus`; reviewer/analyst/doc-writer agents refreshed from upstream (already opus).
+  - `codex/AGENTS.md`: Claude secondary pinned to `claude-opus-4-8` (Fable blocked), Rule 4a Contract Gate, Deployed Copy Sync (hooks.json no-clobber protects the Codex SessionStart recovery hook).
+
+- **Wave 2 — G4 testing system (adapted) + G2 workflows.**
+  - Testing system taken as-is from upstream: `tools/detect-test-env.sh`, `tools/release-gate.sh`, `tools/cleanup-testcontainers.sh`, `tools/verify-phase2-dag.sh`, `templates/test-env.schema.json`, `prompts/test-strategy.md`, `references/phase2/steps/release-gate.md`, `references/workflow-orchestration.md`, `workflows/superflow-review.js`, `workflows/superflow-wave.js`.
+  - Phase 0 wiring: Stage 1 runs `detect-test-env.sh` in parallel; Stage 3 renders a Testing Infrastructure section from `.superflow/test-env.json`; state writes merge into `context` (preserve `run_id`); greenfield crash-recovery row (`stage=greenfield`).
+  - Phase 1: Step 13a Test Strategy (journeys + `spec_tag` + `owning_sprint` into the charter YAML/body); Step 12 `use_workflows` opt-in recorded in state. Upstream's Step 2c model-profile block was SKIPPED (it re-introduces Sonnet implementers).
+  - **Release Gate adapted to ADVISORY-by-default (Rule 14):** binding (blocks Phase 3) only when `.superflow/test-env.json` shows infra ready AND the charter defines `test_strategy` journeys AND a test suite exists; otherwise records `WARN`/`SKIPPED` and does NOT hard-block Phase 3 (including the `local_commit` merge path in phase3-merge.md). The sprint contract's browser/artifact evaluator pass stays the binding gate on this environment-absent POS.
+  - `SKILL.md`: `sf_sync` checksum-deploy (ALWAYS-sync kept), `workflows/` deploy, `~/.codex/hooks.json` no-clobber, self-contained skill-root re-resolve, `run_id` uuid-lowercase + jq-merge. Startup numbering 1-9, one-line banner, Rule 2b state-isolation step all preserved. No event-emit resolver re-added.
+  - `state-schema.json`: added `use_workflows` field and the missing `local_commit` enum value.
+  - Removed `docs/superflow/sprint-queue.json` (upstream deleted it; Phase 3 baseline now reads `.superflow/completion-data.json` with charter fallback).
+
+- **Skipped from upstream:** the Sonnet/Haiku implementer policy (tier tables, dispatch rules, Phase 0 haiku opt-ins) — all agents stay `model: opus`; the event-telemetry stack (`sf_emit`/`sf-emit.sh`/`event-schema.json`/`events.jsonl`) — remains deleted; upstream GitHub Actions CI (`.github/workflows/ci.yml`) — not adopted on this local POS.
+
 ## 5.4.0 — 2026-07-11
 
 Field-audit fixes (single-operator POS deployment, one month of production runs):

@@ -1,7 +1,7 @@
 # Superflow — Claude Instructions
 
 ## Project Overview
-Superflow is a pure Markdown skill that orchestrates a 4-phase dev workflow: onboarding, product discovery with expert panel brainstorming, Product Vision alignment, and git workflow selection, autonomous execution with a selected branch/PR strategy, and merge. v5.4.0, MIT License. Supports both **Claude Code** and **Codex CLI** as primary orchestrator (auto-detected at startup via `$CLAUDE_CODE_SESSION_ID`).
+Superflow is a pure Markdown skill that orchestrates a 4-phase dev workflow: onboarding, product discovery with expert panel brainstorming, Product Vision alignment, and git workflow selection, autonomous execution with a selected branch/PR strategy, and merge. v5.5.0-pos (POS fork; selective hand-merge of upstream v5.7.0), MIT License. Supports both **Claude Code** and **Codex CLI** as primary orchestrator (auto-detected at startup via `$CLAUDE_CODE_SESSION_ID`). This fork keeps all agents on `model: opus` (no Sonnet/Haiku policy), has the event-telemetry stack removed (`.superflow-state.json` is the single source of truth), and adds the Rule 3a Contract Gate, Rule 2b state isolation, and `local_commit` git workflow mode.
 
 ## Key Rules
 - All documentation output in English — user communication follows their language preference
@@ -52,9 +52,12 @@ SKILL.md (entry point, ~240 lines, auto-detects Claude/Codex runtime)
   │   ├── security-audit.md (Claude security fallback for Phase 0)
   │   └── codex/ (Codex-specific prompts: code-reviewer, product-reviewer, audit)
   ├── agents/ (12 agent definitions — deep/standard/fast tiers; all model: opus, differ by effort)
+  ├── workflows/ (saved Claude workflows: superflow-review.js, superflow-wave.js → ~/.claude/workflows/)
+  ├── tools/ (detect-test-env.sh, release-gate.sh, cleanup-testcontainers.sh, verify-phase2-dag.sh, measure-phase2-context.sh)
   ├── templates/
-  │   ├── superflow-state-schema.json (state file JSON Schema)
+  │   ├── superflow-state-schema.json (state file JSON Schema — + use_workflows, local_commit)
   │   ├── contract-template.yml (sprint contract template — checkable criteria + evidence channel)
+  │   ├── test-env.schema.json (schema for .superflow/test-env.json produced by detect-test-env.sh)
   │   ├── greenfield/ (stack scaffolding: nextjs.md, python.md, generic.md)
   │   └── ci/ (CI workflows: github-actions-node.yml, github-actions-python.yml)
 ```
@@ -86,8 +89,12 @@ SKILL.md (entry point, ~240 lines, auto-detects Claude/Codex runtime)
 | `prompts/expert-panel.md` | Expert persona prompt — proposals, challenge, recommendation |
 | `prompts/llms-txt-writer.md` | llmstxt.org standard, no hard size limit |
 | `prompts/claude-md-writer.md` | Verified paths/commands, <200 lines target |
-| `tools/verify-phase2-dag.sh` | Static DAG verifier — validates all 9 governance×complexity cells, 7-stage sequence, step_files coverage, and on-disk step file existence; exits 0 on full pass |
+| `tools/verify-phase2-dag.sh` | Static DAG verifier — validates all 9 governance×complexity cells, 7-stage sequence, step_files coverage, on-disk step file existence, and the `release_gate` phase gate; exits 0 on full pass |
 | `tools/measure-phase2-context.sh` | Context savings quantifier — computes pre-Run-3 vs post-Run-3 per-turn token load using git history; outputs a one-line summary (Savings: 76.4%) |
+| `tools/detect-test-env.sh` | Phase 0 test-infra probe — writes `.superflow/test-env.json` (project type, docker runtime, test runners, Playwright browsers, readiness verdict); read-only, installs nothing |
+| `tools/release-gate.sh` | Post-sprint-loop release-gate verdict engine (bash+jq); PASS/SKIPPED/FAIL from journeys+results. Adapted to ADVISORY unless infra+`test_strategy`+test-suite all present (enforcement Rule 14) |
+| `tools/cleanup-testcontainers.sh` | Label-based (`org.testcontainers=true`) leftover-container cleanup; the only docker-touching command the orchestrator may run |
+| `workflows/superflow-review.js`, `workflows/superflow-wave.js` | Saved Claude multi-agent workflows (opt-in `context.use_workflows`) for review fan-out and parallel implementation waves → deployed to `~/.claude/workflows/` |
 
 ## Conventions
 - Pure Markdown skill (no Python, no pip dependencies)
@@ -102,7 +109,10 @@ SKILL.md (entry point, ~240 lines, auto-detects Claude/Codex runtime)
 - **Git workflow modes** (`solo_single_pr`, `sprint_pr_queue`, `stacked_prs`, `parallel_wave_prs`, `trunk_based`, `local_commit`): selected in Phase 1, stored in state and charter, and controls branch base, PR count, sprint parallelism, and merge order
 - **Product Vision alignment**: Phase 1 uses a single recommendation-led decision brief with options, tradeoffs, reversibility, safe defaults, and support for "do what you recommend", one-message, or audio-transcript answers. It replaces the old design-tree grilling pattern.
 - **Autonomy Charter**: durable intent artifact generated at end of Phase 1. Injected into sprint prompts and reviewers as single source of truth for autonomous execution boundaries
-- **Codex model policy**: Codex subagents and Claude-runtime `codex exec` secondary calls use `gpt-5.5`; deep analyst/implementer/reviewer roles use `xhigh`, standard roles use `high`, and fast implementer uses `medium`. Codex-runtime Claude product/research secondary calls use exact model `claude-opus-4-7` with `--effort xhigh`.
+- **Model policy (all-opus)**: every Superflow agent runs on plain `model: opus` (owner directive 2026-06-06 — no Sonnet/Haiku policy anywhere); depth is differentiated by effort (deep = max, standard = high, fast = low) via agent-definition frontmatter. Codex subagents and Claude-runtime `codex exec` secondary calls use `gpt-5.5` (deep = `xhigh`, standard = `high`, fast = `medium`). Codex-runtime Claude product/research secondary calls use exact model `claude-opus-4-8` with `--effort xhigh` (Fable access is blocked).
+- **Testing system (adaptive Release Gate)**: Phase 0 `detect-test-env.sh` writes `.superflow/test-env.json`; Phase 1 Step 13a builds a charter `test_strategy` (journeys keyed by stable `spec_tag`, each with an `owning_sprint`); the post-sprint-loop Release Gate (`tools/release-gate.sh`) computes `.superflow/release-gate/verdict.json`. **The gate is ADVISORY by default on this POS** — it BLOCKS Phase 3 only when infra is ready AND the charter defines `test_strategy` journeys AND a test suite exists (enforcement Rule 14); otherwise the sprint contract's browser/artifact evaluator pass remains the binding gate.
+- **Saved workflows (opt-in)**: `context.use_workflows` (Claude runtime) enables `/superflow-review` (review fan-out) and `/superflow-wave` (parallel implementation-only waves). Single authority: `references/workflow-orchestration.md`. Fallback to manual Agent dispatch when disabled/unavailable.
+- **Verdict contract**: every reviewer ends its message with a fenced JSON `{verdict, findings, summary}` block; the orchestrator extracts it mechanically (awk/sed → jq) and assembles `.par-evidence.json` — no prose parsing. Reviewer dispatch fills the `<spec_or_plan>`/`<autonomy_charter>`/`<original_spec>`/`<product_brief>` context slots verbatim.
 - **Per-PR docs gate**: every PR must run documentation update and separate documentation review before `gh pr create`. In per-sprint PR modes this happens every sprint; in `solo_single_pr` it happens before the final PR. `.par-evidence.json` must include `docs_update` (`UPDATED` or `UNCHANGED`) and `docs_review: PASS`; `llms.txt` is explicitly audited for every PR.
 - **Contract Gate (Rule 3a)**: each Phase 2 sprint opens with an agreed `docs/superflow/contracts/<date>-<feature>.contract.yml` (checkable criteria) BEFORE code; the evaluator confirms sufficiency, then Unified Review verifies it criterion-by-criterion (`.par-evidence.json` gains a `criteria` PASS/FAIL table). UI sprints add a Playwright browser pass; artifact sprints (steel/workbook) open & reconcile every produced file. Template `templates/contract-template.yml`, how-to `references/contract-gate.md`. Adapts the planner→agent→evaluator / contract-first scheme.
 
