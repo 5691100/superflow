@@ -35,15 +35,48 @@ Independent sprints (non-overlapping files, no `depends_on` links) run concurren
 worktrees. Parse all sprint `files:` and `depends_on:` metadata, build dependency graph, group into
 waves by topological sort. Store wave plan in `.superflow-state.json` under `context.sprint_waves`.
 
-Each parallel sprint agent runs the FULL 6-stage Per-Sprint Flow independently:
+**Preferred when available — saved /superflow-wave workflow (Claude runtime, opt-in).** When
+RUNTIME:claude, `context.use_workflows=true` in `.superflow-state.json`, and workflows are
+available, PREFER invoking the saved `/superflow-wave` workflow for the wave instead of N manual
+`Agent()` calls:
+
 ```
+/superflow-wave  args: {sprints: [{id, branch, worktree, task}], charter_path: "<charter file>"}
+```
+
+It fans out one implementer per sprint in parallel (implementation ONLY — code, tests, commit
+inside the given worktree) and returns a per-sprint status array; failed or unparseable results
+are treated as implementation-failed (fail closed). REVIEW IS NOT IN THE WORKFLOW — exactly as
+with manual dispatch, the ORCHESTRATOR runs review → docs → PAR → ship per sprint afterwards.
+Details and availability checks: `references/workflow-orchestration.md`.
+
+**Fallback:** Codex runtime, `use_workflows=false`, or workflows unavailable → the parallel Agent
+dispatch below, unchanged.
+
+**Claude runtime — implementation-only parallelism.** Subagents CANNOT dispatch further subagents
+via the Agent tool, so a sprint agent can never run reviews or create PRs itself. A parallel wave
+is N implementers dispatched in parallel — one per sprint, each in its own worktree:
+
+```
+# One call per sprint in the wave — implementation ONLY:
 Agent(
-  subagent_type: "standard-implementer",
-  model: "opus",  # ALWAYS explicit
+  subagent_type: "standard-implementer",  # tier per complexity table below
+  model: "opus",                          # ALWAYS explicit (owner directive: all agents opus)
   run_in_background: true,
-  prompt: "Execute Sprint N: [title] — full Per-Sprint Flow. ..."
+  prompt: "Implement Sprint N: [title] in worktree .worktrees/sprint-N — tasks, code, tests only.
+           Do NOT review, update docs, write PAR evidence, or create PRs."
 )
 ```
+
+As each implementer finishes, the ORCHESTRATOR runs the remaining stages for that sprint
+sequentially: review → docs → PAR → ship. FORBIDDEN on Claude runtime: dispatching one implementer
+to "execute the full Per-Sprint Flow" — reviews and PR creation inside an implementer are impossible
+(no nested Agent dispatch), so that pattern silently skips every gate.
+
+**Codex runtime exception.** With `[agents] max_threads=6, max_depth=2`, sprint supervisors spawned
+via `spawn_agent` CAN spawn their own per-sprint implement/review/doc agents — the full per-sprint
+flow inside a supervisor is allowed there. Old `max_depth=1` configs fall back to sequential
+sprints. See `references/codex-dispatch-patterns.md`.
 
 Fallback: if ≤3 total sprints or all sprints form a single dependency chain, run sequentially.
 Holistic review is mandatory when `max_parallel > 1` (enforcement rule 9).
@@ -55,11 +88,12 @@ Sprint complexity tag in the plan drives implementer tier:
 | Complexity | Agent | Model | Effort | When |
 |-----------|-------|-------|--------|------|
 | simple | fast-implementer | opus | low | 1-2 files, CRUD/template, <50 lines |
-| medium | standard-implementer | opus | medium | 2-5 files, some new logic. Default if untagged. |
-| complex | deep-implementer | opus | high | 5+ files, new architecture, security-sensitive |
+| medium | standard-implementer | opus | high | 2-5 files, some new logic. Default if untagged. |
+| complex | deep-implementer | opus | max | 5+ files, new architecture, security-sensitive |
 
-**ALWAYS pass `model: "opus"` explicitly** — frontmatter `model:` is NOT reliably inherited.
-Without it, subagents inherit the parent's model (Opus), wasting tokens.
+**ALWAYS pass `model: "opus"` explicitly for every agent** — frontmatter `model:` is NOT reliably
+inherited. A forgotten `model:` silently inherits the orchestrator's session model. Depth is
+differentiated by effort (deep = max, standard = high, fast = low), never by a weaker model.
 
 Include `llms.txt` content in agent context (if file exists).
 Extract and paste the exact task list, file paths, and expected behaviors verbatim into the

@@ -11,13 +11,13 @@ Superflow is a 4-phase development workflow skill for Claude Code:
 - **Phase 2 (Autonomous Execution):** Sprint-based autonomous development — selected git workflow mode, git worktrees, TDD, wave-based parallel dispatch, governance-aware review tiering, charter compliance checks, mandatory per-PR `llms.txt`/`CLAUDE.md` update + review gate
 - **Phase 3 (Merge):** User-initiated sequential rebase merge with CI verification, structured completion data (`completion-data.json`), and documentation update
 
-Version: v5.3.0 (2026-04-26). MIT License.
+Version: v5.5.0-pos (2026-07-11). MIT License. POS fork of upstream — selective hand-merge of upstream v5.7.0. This fork keeps ALL agents on `model: opus` (no Sonnet/Haiku policy), has the event-telemetry stack removed (`.superflow-state.json` is the single source of truth), and adds the Rule 3a Contract Gate, Rule 2b state isolation, and the `local_commit` git workflow mode. It adopts upstream's testing system (adaptive Release Gate), saved workflows, and reviewer verdict-contract.
 
 ## File Structure
 
-- [SKILL.md](SKILL.md): Entry point — startup checklist (6 steps), provider detection, phase routing (~240 lines)
-- [superflow-enforcement.md](superflow-enforcement.md): 13 hard rules + Rule 3a (Contract Gate) that survive context compaction — deployed to ~/.claude/rules/ (106 lines)
-- [codex/AGENTS.md](codex/AGENTS.md): Codex equivalent of superflow-enforcement.md — hard rules and agent behavior for Codex runtime (98 lines)
+- [SKILL.md](SKILL.md): Entry point — startup checklist (9 steps: runtime detect → skill-root/rules → session recovery → env detect + checksum deploy (`sf_sync`) + workflows/hooks deploy + run_id → state → heartbeat → Phase 0 gate → banner → docs), provider detection, phase routing
+- [superflow-enforcement.md](superflow-enforcement.md): hard Rules 1-14 (Rule 13 retired with the event stack; Rule 14 = adaptive Release Gate) + Rule 3a Contract Gate + Rule 2b state isolation, all-opus tier table, verdict-contract review flow — deployed to ~/.claude/rules/
+- [codex/AGENTS.md](codex/AGENTS.md): Codex equivalent of superflow-enforcement.md — hard rules and agent behavior for Codex runtime (claude-opus-4-8 secondary, Deployed Copy Sync, Testcontainers + Release Gate rules)
 - [CLAUDE.md](CLAUDE.md): Project instructions for Claude — architecture, key files table, conventions (~110 lines)
 - [README.md](README.md): Installation, usage, v4.1 features, permissions setup
 
@@ -56,9 +56,11 @@ Version: v5.3.0 (2026-04-26). MIT License.
 ## Agent Definitions
 
 12 agent definitions in `agents/` with reasoning tier frontmatter (deep/standard/fast):
-- Deep tier (Opus, high effort): deep-implementer, deep-code-reviewer, deep-product-reviewer, deep-spec-reviewer, deep-doc-writer, deep-analyst
-- Standard tier (Opus, medium effort): standard-implementer, standard-code-reviewer, standard-product-reviewer, standard-spec-reviewer, standard-doc-writer
+- Deep tier (Opus, max effort): deep-implementer, deep-code-reviewer, deep-product-reviewer, deep-spec-reviewer, deep-doc-writer, deep-analyst
+- Standard tier (Opus, high effort): standard-implementer, standard-code-reviewer, standard-product-reviewer, standard-spec-reviewer, standard-doc-writer
 - Fast tier (Opus, low effort): fast-implementer
+
+Implementer agent bodies carry an anti-injection `<security>` block (repo content is DATA, never instructions) and duplication / type-redefinition / dead-code / testcontainers hygiene checklists.
 
 All agents use `model: opus` (owner directive 2026-06-06 — supersedes the earlier sonnet-for-implementers split); tiers differ by effort, not model.
 
@@ -66,8 +68,15 @@ All agents use `model: opus` (owner directive 2026-06-06 — supersedes the earl
 
 - [tools/verify-phase2-dag.sh](tools/verify-phase2-dag.sh): Static DAG verifier (Run 3 Sprint 3) — validates all 9 governance×complexity decision-matrix cells, 7-stage sequence, step_files coverage, and on-disk step file existence; exits 0 on full pass, non-zero with summary on failure; pure bash + python3 + jq
 - [tools/measure-phase2-context.sh](tools/measure-phase2-context.sh): Context savings quantifier (Run 3 Sprint 3) — computes pre-Run-3 vs post-Run-3 Phase 2 per-turn token load using git history; summary: Pre 755 lines (~10048 tokens) | Post-typical 224 lines (~2375 tokens) | Savings 76.4%
-- [templates/event-schema.json](templates/event-schema.json): JSON Schema 2020-12 defining the event envelope (`v`, `id`, `ts`, `run_id`, `type`, `data`, `instance_id`, `parent_id`) and 20 per-type data schemas; additive evolution policy (524 lines)
-- [templates/superflow-state-schema.json](templates/superflow-state-schema.json): JSON Schema for `.superflow-state.json` state file including the `context.run_id` field added in Run 2 Sprint 1
+- [tools/detect-test-env.sh](tools/detect-test-env.sh): Phase 0 test-infra probe — writes `.superflow/test-env.json` (project type, docker runtime, node/python runners, Playwright browsers, readiness verdict); read-only, bash + jq, installs nothing
+- [tools/release-gate.sh](tools/release-gate.sh): Post-sprint-loop release-gate verdict engine (bash + jq) — computes PASS/SKIPPED/FAIL from `--journeys` + `--results`; on this POS the gate is ADVISORY unless infra + charter `test_strategy` + a test suite are all present (enforcement Rule 14)
+- [tools/cleanup-testcontainers.sh](tools/cleanup-testcontainers.sh): Label-based leftover-container cleanup (`label=org.testcontainers=true`) — the only docker-touching command the orchestrator may run
+- [workflows/superflow-review.js](workflows/superflow-review.js), [workflows/superflow-wave.js](workflows/superflow-wave.js): Saved Claude multi-agent workflows (opt-in `context.use_workflows`) — review fan-out and parallel implementation-only waves; deployed to `~/.claude/workflows/`
+- [references/workflow-orchestration.md](references/workflow-orchestration.md): Single authority on saved-Workflow usage inside Superflow — availability checks, opt-in, fallbacks
+- [prompts/test-strategy.md](prompts/test-strategy.md): Phase 1 Step 13a Test Strategy builder — journeys keyed by stable `spec_tag`, `owning_sprint` assignment, level/coverage/runtime-matrix conventions
+- [references/phase2/steps/release-gate.md](references/phase2/steps/release-gate.md): Release-gate stage instructions — journeys.json emit, Playwright json reporter, per-`spec_tag` coverage, verdict computation
+- [templates/test-env.schema.json](templates/test-env.schema.json): JSON Schema for `.superflow/test-env.json` produced by detect-test-env.sh
+- [templates/superflow-state-schema.json](templates/superflow-state-schema.json): JSON Schema for `.superflow-state.json` — includes `context.run_id`, `use_workflows`, and the `local_commit` git workflow mode
 - [templates/contract-template.yml](templates/contract-template.yml): Sprint contract template — checkable criteria (product/data/regression/security/ux) with evidence channel (browser/test/api/artifact/cli), scope in/out, invariants, and a gate block (56 lines)
 
 ## Key Concepts
@@ -78,7 +87,7 @@ All agents use `model: opus` (owner directive 2026-06-06 — supersedes the earl
 - **Expert panel brainstorming:** Phase 1 dispatches 3-4 parallel expert persona agents (Product GM, Staff Engineer, UX/Workflow, Domain Expert). Outputs synthesized into Board Memo with consensus, disagreements, risks, and decisions needed
 - **Product Vision alignment:** Replaces design-tree grilling. After direction lock, Superflow presents one recommendation-led decision brief with options, tradeoffs, reversibility, and safe defaults. The user can say "do what you recommend" / "делай как рекомендуешь" to accept all recommendations, answer with corrections only, use a numbered list, or paste an audio transcript; non-blocking gaps become assumptions instead of a long question chain
 - **2-agent specialized review:** Every PR is reviewed by 2 agents in parallel — Claude (Product lens: spec fit, user scenarios, charter compliance) + Codex/secondary (Technical lens: correctness, security, charter compliance). Governance mode controls whether single or dual review
-- **Codex model policy:** Codex subagents and Claude-runtime `codex exec` secondary calls use `gpt-5.5`; deep analyst/implementer/reviewer roles use `xhigh`, standard roles use `high`, and fast implementer uses `medium`. Codex-runtime Claude product/research secondary calls use exact model `claude-opus-4-7` with `--effort xhigh`
+- **Model policy (all-opus):** Every Superflow agent runs on plain `model: opus` (owner directive 2026-06-06 — no Sonnet/Haiku policy); depth differs by effort (deep = max, standard = high, fast = low). Codex subagents and Claude-runtime `codex exec` secondary calls use `gpt-5.5`; deep roles use `xhigh`, standard `high`, fast `medium`. Codex-runtime Claude product/research secondary calls use exact model `claude-opus-4-8` with `--effort xhigh` (Fable access is blocked)
 - **Codex sprint-level parallelism:** Recommended config is `[agents] max_threads=6, max_depth=2`. With `max_depth>=2`, Codex can spawn parallel sprint supervisors that spawn per-sprint implement/review/doc agents. Old `max_depth=1` configs fall back to sequential sprints
 - **Contract Gate (Rule 3a):** Each Phase 2 sprint starts with an agreed, checkable contract (`docs/superflow/contracts/<date>-<feature>.contract.yml`) BEFORE code — the evaluator confirms criteria sufficiency, then Unified Review verifies the contract criterion-by-criterion (`.par-evidence.json` carries a PASS/FAIL table per `criteria.id`). UI sprints add a Playwright browser pass; steel/workbook sprints add an artifact pass (run on golden fixtures, open & reconcile every produced file). Adapts the planner→agent→evaluator / contract-first scheme
 - **Review gate:** Mandatory gate before every PR push — product/technical reviewers must pass, sprint docs must be updated or explicitly confirmed unchanged, and documentation review must pass; evidence is written to `.par-evidence.json`

@@ -91,6 +91,25 @@ TaskCreate(
 <!-- Stage 1: Pre-merge -->
 
 Before merging any PR:
+0a. **Release gate precondition (COMPACTION-SURVIVING — check first)** — adaptive per enforcement Rule 14. The gate is BINDING only when ALL hold: `.superflow/test-env.json` shows infra ready (docker/browsers), the charter defines `test_strategy` journeys, and a Playwright/test suite exists. Evaluate the verdict:
+   ```bash
+   if [ -f .superflow/release-gate/verdict.json ]; then
+     echo "Release gate verdict: $(jq -r '.verdict' .superflow/release-gate/verdict.json)"
+   else
+     echo "Release gate: no verdict.json (advisory)"
+   fi
+   ```
+   - **Binding case** (Rule 14 conditions all hold): refuse merge unless the verdict is `PASS` or `SKIPPED` (`SKIPPED` = `project_type=library` ONLY; the helper never emits SKIPPED for environment-blocked runs). If the file is absent or the verdict is `FAIL`, **STOP** — fix the failing journeys/integration in the branch, re-run `bash tools/release-gate.sh`, wait for `verdict=PASS`, then proceed.
+   - **Advisory case** (infra absent — no docker/browsers, no `test_strategy` journeys, or no test suite — the DEFAULT on this POS, and always in `local_commit` mode): a missing verdict or a `WARN`/`FAIL` records an advisory warning and DOES NOT block the merge. The sprint contract's browser/artifact evaluator pass (enforcement Rule 3) remains the binding gate. Do NOT let an absent test environment hard-block Phase 3.
+
+   When a verdict.json exists, fold it into `.par-evidence.json` as the `release_gate` audit field:
+   ```bash
+   if [ -f .superflow/release-gate/verdict.json ] && [ -f .par-evidence.json ]; then
+     GATE_VERDICT=$(jq -r '.verdict' .superflow/release-gate/verdict.json)
+     jq --arg rg "$GATE_VERDICT" '. + {release_gate: $rg}' .par-evidence.json > .par-evidence.json.tmp \
+       && mv .par-evidence.json.tmp .par-evidence.json
+   fi
+   ```
 0. **Read completion data** — load `context.completion_data_file` from `.superflow-state.json`:
    ```bash
    python3 -c "import json; s=json.load(open('.superflow-state.json')); p=s.get('context',{}).get('completion_data_file'); print(open(p).read() if p else 'No completion data')"
@@ -103,6 +122,8 @@ Before merging any PR:
    - New commands (build/test/lint) are listed
    - Removed or renamed files are cleaned up
    - Use `prompts/claude-md-writer.md` for conventions
+
+> **Optional extra gate:** the orchestrator MAY SUGGEST that the user run `/code-review ultra <PR#>` as an additional deep review pass before merge. Never launch it autonomously — `/code-review ultra` is user-triggered and billed to the user. Suggest only; the user decides.
 
 ## Documentation Update (pre-merge)
 <!-- Stage 1: Pre-merge, Todos 3-4 -->
@@ -135,7 +156,7 @@ If CWD is already inside a worktree, ALL subsequent commands will fail with "Pat
 
 Use the PR list and merge order from the Phase 2 Completion Report. If the report is unavailable (context compaction), enumerate open PRs: `gh pr list --state open --author @me --json number,title,headRefName --jq 'sort_by(.number)'`
 
-Read `context.git_workflow_mode` from `.superflow-state.json`; if missing, default to `sprint_pr_queue`.
+Read `context.git_workflow_mode` from `.superflow-state.json`; if missing, default to `local_commit` when the repo has no GitHub remote with CI, else `sprint_pr_queue`.
 
 Merge policy by mode:
 - `solo_single_pr`: merge the single final PR after CI, docs, and review checks pass.
@@ -143,6 +164,7 @@ Merge policy by mode:
 - `parallel_wave_prs`: merge PRs sequentially in wave order, then sprint order inside each wave. Never merge in parallel.
 - `stacked_prs`: merge Sprint 1 first. Before each later sprint merge, fetch `origin/main`, check out the sprint branch, rebase it onto `origin/main`, push with `--force-with-lease`, retarget the PR base to `main` (`gh pr edit <number> --base main`), wait for CI, then merge.
 - `trunk_based`: merge short-lived PRs in dependency order from the completion data.
+- `local_commit` (repo with no CI remote, e.g. backup-only): NO PRs and NO CI lane. Skip the PR merge loop below. For each sprint branch in order: exit the worktree → `cd <main-repo-root>` → `git merge --no-ff <branch>` (or rebase-ff) into main → `git worktree remove` + `git worktree prune` → push the backup remote (`git push <backup> main`). The Rule 3 gate (reviews + PAR + docs) already gated each branch; the release gate is advisory here (see Step 0a).
 
 At merge start, if Telegram MCP available:
 ```
@@ -158,11 +180,14 @@ for each PR in sprint order:
      - If "MERGED": skip, log as already merged
      - If "CLOSED": warn user, skip
      - If "OPEN": proceed with merge
-  1. gh pr checks <number> — verify CI green
+  1. Verify CI green before merging:
+     - Claude runtime: use the native Monitor tool to wait until the PR's checks
+       conclude (success or failure), then proceed — green → step 2, red → see
+       "CI Failure During Merge" below.
+     - Codex runtime: poll `gh pr checks <number>` / `gh run list` until checks conclude.
+     - NEVER `gh pr merge --admin` to bypass red CI.
      - If CI failing, send Telegram (if MCP available):
        mcp__plugin_telegram_telegram__reply(chat_id: <chat_id>, text: "PR #N CI failed, investigating...")
-     # NOTE: no event emitted on CI failure/abandon — pr.merge is reserved for successful merges.
-     # Failed-merge telemetry is TBD (see CHANGELOG deferred).
   2. gh pr merge <number> --rebase --delete-branch
   3. If merge fails due to conflict:
      a. git fetch origin main
@@ -195,12 +220,14 @@ for each PR in sprint order:
 
 ## CI Failure During Merge
 
-If `gh pr checks <number>` shows failing checks:
-1. Identify the failing check: `gh pr checks <number>`
+If the PR's checks conclude red:
+1. Identify the failing check: `gh pr checks <number>`, then investigate with `gh run view <id> --log-failed`
 2. Check out the branch: `git checkout <branch>`
 3. Diagnose: read CI logs, reproduce locally if possible
 4. Fix, commit, push
-5. Wait for CI to pass (poll `gh pr checks <number>`, max 5 minutes)
+5. Wait for the new checks run to conclude:
+   - Claude runtime: use the native Monitor tool to wait for checks to conclude (success/failure)
+   - Codex runtime: poll `gh pr checks <number>` / `gh run list`, max 5 minutes
 6. If CI still fails after 2 fix attempts: stop and report to user with error details
 7. Resume merge sequence from the failed PR
 
@@ -208,11 +235,16 @@ If `gh pr checks <number>` shows failing checks:
 ## Post-Merge Verification
 <!-- Stage 2: Merge (final step) -->
 
-After all PRs are merged, run the full test suite on main to verify integration:
+After all PRs are merged (or, in `local_commit` mode, after all sprint branches are merged locally), run the full test suite on main to verify integration:
 ```bash
-git checkout main && git pull origin main
-python3 -c "import json; q=json.load(open('docs/superflow/sprint-queue.json')); print(q.get('baseline_cmd','No baseline command found'))"
+git checkout main && git pull origin main 2>/dev/null || git checkout main
+BASELINE_CMD=$(jq -r '.baseline_test_cmd // empty' .superflow/completion-data.json 2>/dev/null)
 ```
+Resolve the baseline test command with graceful fallback:
+1. `baseline_test_cmd` from `.superflow/completion-data.json` (optional field written by the Phase 2 completion-report step).
+2. If the file or the field is missing: fall back to the test command recorded in the Autonomy Charter (path in `context.charter_file` of `.superflow-state.json`).
+3. If the charter is also unavailable or records no test command: print a warning and ask the user for the project's test command.
+
 Execute the baseline test command. If tests fail: warn the user with specific failures before ending the session. Do NOT proceed to Post-Merge Report until tests pass or user acknowledges failures.
 
 ## Post-Merge Report
