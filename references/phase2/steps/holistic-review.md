@@ -26,9 +26,15 @@ Same principle: Claude = Product lens, secondary = Technical lens.
 a. Agent(subagent_type: "deep-product-reviewer", run_in_background: true,
          prompt: "Review ALL sprint changes. Focus: end-to-end user flows, data integrity
                   across sprints, spec compliance.")
-b. $TIMEOUT_CMD 900 codex exec review -c model_reasoning_effort=high --ephemeral \
-     "Review all changes across all sprints for cross-module issues, architecture, security." 2>&1
+b. printf '%s\n' "Review all changes across all sprints for cross-module issues, architecture, security." \
+     > /tmp/holistic-review.md
+   bash tools/codex-review.sh run --slug holistic-technical --base main --effort xhigh \
+     --deadline-sec 900 --prompt-file /tmp/holistic-review.md          # [run_in_background: true]
+   # verdict: jq -r .verdict "$(ls -d .superflow/reviews/holistic-technical/* | tail -1)/verdict.json"
+   # exit 0 = pass-class, 3 = fail-class, 1 = no valid verdict (gate CLOSED)
 ```
+Never call `codex exec` raw here, and never add an outer `timeout` — the wrapper owns the deadline
+and reaps its whole process group. See `references/codex-review-wrapper.md`.
 
 **Without Codex (split-focus fallback):**
 ```

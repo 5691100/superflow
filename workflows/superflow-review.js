@@ -84,9 +84,15 @@ function productPrompt(a) {
 function technicalPrompt(a) {
   return (
     "You are the TECHNICAL reviewer for Superflow sprint " + a.sprint + ". Apply the fallback chain YOURSELF via Bash:\n" +
-    "1. Run: command -v codex. If the Codex CLI exists, resolve TIMEOUT_CMD (gtimeout, else timeout).\n" +
-    "   cd into " + a.workdir + " (the sprint worktree) so the sprint branch checkout is visible, then run:\n" +
-    "   $TIMEOUT_CMD 600 codex exec review --base " + a.base + " -m gpt-5.5 -c model_reasoning_effort=high --ephemeral 2>&1\n" +
+    "1. Run: command -v codex. If the Codex CLI exists, cd into " + a.workdir + " (the sprint worktree) so the\n" +
+    "   sprint branch checkout is visible, write your review instructions to a prompt FILE, then run the\n" +
+    "   transparent wrapper (NEVER raw `codex exec`, NEVER pipe it into `tail -N`, NEVER add an outer timeout —\n" +
+    "   it owns its own deadline and process group):\n" +
+    "   bash tools/codex-review.sh run --slug sprint-" + a.sprint + "-technical --base " + a.base + " --effort high --prompt-file <prompt.md>\n" +
+    "   Then read the machine-validated verdict:\n" +
+    "   RUN=$(ls -d .superflow/reviews/sprint-" + a.sprint + "-technical/* | tail -1); jq -r .verdict \"$RUN/verdict.json\"\n" +
+    "   Wrapper exit 0 = pass-class, 3 = fail-class, 1 = NO valid verdict (FAILED/TIMED_OUT/malformed) — in that\n" +
+    "   case the gate stays CLOSED: diagnose via $RUN/stderr.log and $RUN/final.md, do NOT invent a PASS.\n" +
     "   Wrap its findings honestly into the verdict block below (verdict APPROVE or REQUEST_CHANGES).\n" +
     "2. If codex is absent: act as the Claude technical reviewer — Read ~/.claude/agents/standard-code-reviewer.md and FOLLOW it " +
     "over the diff of " + a.branch + " vs " + a.base + " (git -C " + a.workdir + " diff " + a.base + "..." + a.branch + "; correctness, security, architecture, performance).\n" +
