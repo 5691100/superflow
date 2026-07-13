@@ -196,23 +196,36 @@ verdict_class_of() {
 #     real CLI emits one (a config deprecation notice) on fully successful exit-0 runs, and T8/T19c
 #     pin that. The distinction is structural — top-level `.type` vs `.item.type` — not textual.
 #
-# Echoes nothing; sets EVENTS_SCAN_ERROR and returns 1 on corrupt or failed evidence.
+# POSITIVE PROOF OF COMPLETION (r4). Rejecting every failure we recognise is still not proof that
+# the run SUCCEEDED — it is only proof that we found nothing wrong, which is what an empty, lost or
+# truncated-away stream also looks like. So the stream must positively CONTAIN the CLI's terminal
+# success event, `turn.completed` (verified against every real run under .superflow/reviews/: one
+# top-level turn.completed per successful run, always). No turn.completed => the run never reached a
+# successful end => no usable verdict, whatever final.md happens to contain. An absent event stream
+# is the absence of proof, not proof of absence.
+#
+# Echoes nothing; sets EVENTS_SCAN_ERROR and returns 1 on corrupt, failed or unproven evidence.
 # ---------------------------------------------------------------------------
 events_scan() {
   EVENTS_SCAN_ERROR=""
   local f="$RUN_DIR/events.jsonl" out
-  [ -s "$f" ] || return 0   # no events at all proves nothing either way; exit_code carries that
+  if [ ! -s "$f" ]; then
+    EVENTS_SCAN_ERROR="events.jsonl is empty — there is no event stream to prove the run completed"
+    return 1
+  fi
 
   out="$(jq -Rr '
     select(test("\\S"))                                   # blank lines are not records
     | (try fromjson catch null) as $e
     | if ($e | type) != "object" then "corrupt"
       else (($e.type // $e.kind // "") | tostring | ascii_downcase) as $t
-        | if ($t == "turn.failed") or ($t == "error") then "failed" else "ok" end
+        | if   ($t == "turn.failed") or ($t == "error") then "failed"
+          elif ($t == "turn.completed")                  then "done"
+          else "ok" end
       end' "$f" 2>/dev/null)"
 
-  if [ -z "$out" ] && [ -s "$f" ]; then
-    EVENTS_SCAN_ERROR="events.jsonl could not be parsed at all — corrupt evidence cannot prove a successful run"
+  if [ -z "$out" ]; then
+    EVENTS_SCAN_ERROR="events.jsonl holds no parseable event records (empty or whitespace-only) — it cannot prove the run completed"
     return 1
   fi
   if grep -qx failed <<<"$out"; then
@@ -221,6 +234,10 @@ events_scan() {
   fi
   if grep -qx corrupt <<<"$out"; then
     EVENTS_SCAN_ERROR="events.jsonl contains a malformed/truncated record — corrupt evidence cannot prove a successful run"
+    return 1
+  fi
+  if ! grep -qx done <<<"$out"; then
+    EVENTS_SCAN_ERROR="events.jsonl contains no turn.completed — the run never reached a successful end (killed or lost mid-stream), so nothing in final.md can be trusted"
     return 1
   fi
   return 0
@@ -239,9 +256,11 @@ events_scan() {
 #      OUTRANKS any stored verdict, so it is checked BEFORE the verdict is even looked at (F11).
 #   2. the provider's exit code was actually RECORDED, and it is 0. `null` means nobody ever saw
 #      the process exit — that is the ABSENCE of proof, not proof of success (F9/F10).
-#   3. the event stream is intact and shows no failed turn — parsed STRUCTURALLY out of the
-#      append-only events.jsonl, not read off status.json (a crashed wrapper never wrote it there,
-#      F10) and not grepped for (field order is not evidence, r3).
+#   3. the event stream POSITIVELY PROVES the run completed — it contains a top-level turn.completed
+#      and no failure — parsed STRUCTURALLY out of the append-only events.jsonl, not read off
+#      status.json (a crashed wrapper never wrote it there, F10) and not grepped for (field order is
+#      not evidence, r3). Finding nothing wrong in a stream that is empty, lost or truncated away is
+#      not the same as finding proof that the run succeeded (r4).
 #   4. final.md exists, is non-empty, and was not written BEFORE the run started — a leftover or
 #      injected final message from another run is not this run's answer (F10).
 #

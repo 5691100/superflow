@@ -19,6 +19,7 @@
 #   17 crash recovery demands proof of success, not absence of bad news    (r2 #3)
 #   18 terminal state + provenance outrank a stored pass verdict           (r2 #4)
 #   19 events.jsonl is parsed structurally, not grepped; corrupt = closed  (r3)
+#   20 a PASS needs positive proof of completion (turn.completed)          (r4)
 #
 # Hermetic: never invokes the real `codex` CLI or the network. All runs use
 # tools/test-fixtures/fake-codex.sh, which replays the real 0.144.1 JSONL grammar.
@@ -975,9 +976,61 @@ t19() {
 }
 
 # ---------------------------------------------------------------------------
+# T20 — r4, and the principle's last mile: rejecting every failure we RECOGNISE is not proof that
+#       the run SUCCEEDED. An empty, lost or truncated-away event stream also contains no errors —
+#       and it used to sail through, so a valid-looking fence in final.md opened the gate on a run
+#       that may never have finished. The stream must positively CONTAIN turn.completed.
+# ---------------------------------------------------------------------------
+t20() {
+  head_ T20 "a PASS needs positive proof of completion (turn.completed), not just no errors (r4)"
+  local root="$TMPROOT/t20"; mkdir -p "$root"
+
+  # (a) TRAP: the event stream is GONE (lost, disk full, killed mid-write) but final.md holds a
+  #     flawless APPROVE. No errors to find — and no proof of anything either.
+  mk_evidence_fixture "$root/empty" COMPLETED 0
+  : > "$root/empty/events.jsonl"
+  timeout 30 bash "$WRAPPER" reconcile "$root/empty" >"$root/a.txt" 2>&1
+  assert_eq 1 "$?" "T20a empty events.jsonl + valid APPROVE fence -> exit 1"
+  assert_absent "$root/empty/verdict.json" "T20a no verdict mined from an absent event stream"
+  assert_contains "$root/a.txt" "events.jsonl is empty" "T20a the refusal names the missing stream"
+
+  # (b) TRAP: whitespace only — a file that exists, contains no records, and disproves nothing.
+  #     A FRESH fixture: reconcile rewrites state to FAILED, so reusing (a)'s dir would trip the
+  #     terminal-state check first and this would silently stop testing the stream at all.
+  mk_evidence_fixture "$root/ws" COMPLETED 0
+  printf '\n   \n\t\n' > "$root/ws/events.jsonl"
+  timeout 30 bash "$WRAPPER" reconcile "$root/ws" >"$root/b.txt" 2>&1
+  assert_eq 1 "$?" "T20b whitespace-only events.jsonl -> exit 1"
+  assert_absent "$root/ws/verdict.json" "T20b no verdict mined from a whitespace-only stream"
+  assert_contains "$root/b.txt" "no parseable event records" "T20b the refusal names the empty stream"
+
+  # (c) TRAP: a real stream, real items, no failure anywhere — but the run was killed before it ever
+  #     reached turn.completed. Every "is anything wrong?" check passes; the run still never finished.
+  mk_evidence_fixture "$root/nocomplete" COMPLETED 0
+  printf '%s\n' '{"type":"thread.started","thread_id":"thr_inj"}' \
+                '{"type":"turn.started"}' \
+                '{"type":"item.completed","item":{"id":"item_1","type":"command_execution","status":"completed","exit_code":0}}' \
+                '{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"Reviewed."}}' \
+    > "$root/nocomplete/events.jsonl"
+  timeout 30 bash "$WRAPPER" reconcile "$root/nocomplete" >"$root/c.txt" 2>&1
+  assert_eq 1 "$?" "T20c items but NO turn.completed (killed mid-stream) -> exit 1"
+  assert_absent "$root/nocomplete/verdict.json" "T20c no verdict mined from an unfinished run"
+  assert_contains "$root/c.txt" "no turn.completed" "T20c the refusal names the missing proof"
+
+  # (d) CONTROL: the same evidence with the completion event present. A genuinely complete run must
+  #     still APPROVE — this gate is fail-CLOSED, not fail-paranoid, and T1/T8/T19d already prove
+  #     that every real fake-codex run does emit turn.completed.
+  mk_evidence_fixture "$root/complete" COMPLETED 0
+  timeout 30 bash "$WRAPPER" reconcile "$root/complete" >"$root/d.txt" 2>&1
+  assert_eq 0 "$?" "T20d control: turn.completed + exit 0 + valid fence -> exit 0 (no false closure)"
+  assert_eq "APPROVE" "$(jqf "$root/complete/verdict.json" .verdict)" "T20d control: the APPROVE stands"
+  assert_eq "VERDICT_PARSED" "$(state "$root/complete")" "T20d control: state VERDICT_PARSED"
+}
+
+# ---------------------------------------------------------------------------
 run_all() {
   local t
-  for t in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
+  for t in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20; do
     if want "$t" && declare -F "t$t" >/dev/null; then "t$t"; fi
   done
 }
