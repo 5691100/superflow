@@ -74,13 +74,36 @@ Agent(
 
 ## Technical Lens — Fallback Chain
 
-1. **Primary — Codex** (`codex --version 2>/dev/null` exits 0):
+1. **Primary — Codex, via the transparent wrapper** (`codex --version 2>/dev/null` exits 0):
+   ```bash
+   # Build the prompt as a FILE (never argv — it is large and would leak into the process list)
+   cat prompts/codex/code-reviewer.md > /tmp/sprint-<N>-review.md
+   echo "SPEC_CONTEXT / CONTRACT CRITERIA / AUTONOMY CHARTER" >> /tmp/sprint-<N>-review.md
+
+   bash tools/codex-review.sh run \
+     --slug sprint-<N>-technical --base main --effort high \
+     --prompt-file /tmp/sprint-<N>-review.md        # [run_in_background: true]
    ```
-   $TIMEOUT_CMD 600 codex exec review --base main -m gpt-5.6-sol -c model_reasoning_effort=high --ephemeral \
-        - < <(echo "SPEC_CONTEXT" | cat - prompts/codex/code-reviewer.md) 2>&1  [run_in_background]
+   Never call `codex exec` directly, never pipe it into `tail -N`, and never add an outer
+   `$TIMEOUT_CMD` — the wrapper owns its own hard deadline and process group.
+
+   While it runs, the wrapper prints every state transition plus a heartbeat
+   (`STARTING → SESSION_CREATED → MODEL_WAIT → TOOL_ACTIVE → SYNTHESIZING → COMPLETED → VERDICT_PARSED`,
+   with elapsed / last-event age / remaining deadline / progress-confirmed). `SILENT` and
+   `STALLED_SUSPECTED` mean the provider has gone quiet — they are diagnostics, NOT proof of a hang.
+
+   Read the result mechanically — never from prose:
+   ```bash
+   RUN=$(ls -d .superflow/reviews/sprint-<N>-technical/* | tail -1)
+   jq -r .verdict "$RUN/verdict.json"     # APPROVE | REQUEST_CHANGES | ...
+   jq -r .gate    "$RUN/verdict.json"     # open | closed
    ```
-   For deep tier, use `model_reasoning_effort=xhigh` (and `deep-product-reviewer` on the product
-   side). Record `"provider": "codex"`.
+   Wrapper exit `0` = pass-class verdict, `3` = fail-class verdict, `1` = **no valid verdict**
+   (FAILED/TIMED_OUT/malformed → gate stays CLOSED; diagnose with `$RUN/stderr.log` and
+   `$RUN/final.md`, then re-run — do NOT hand-wave it into a PASS), `2` = usage error.
+
+   For deep tier, use `--effort xhigh` (and `deep-product-reviewer` on the product
+   side). Record `"provider": "codex"`. Full reference: `references/codex-review-wrapper.md`.
 2. **Fallback — native `/code-review` skill**: invoke via the Skill tool at high effort. Record
    `"provider": "code-review-skill"`. Note: `/code-review ultra` CANNOT be launched by the agent
    (user-triggered, billed) — it is only ever SUGGESTED to the user as an optional extra gate at
@@ -153,7 +176,8 @@ SendMessage(
 
 Cold re-dispatch (fresh Agent call with the fix diff + original findings) is the fallback if the
 agent is gone. For Codex technical reviews, commit the fixes first (secondary providers see only
-committed HEAD), then re-run `codex exec review` against the updated HEAD.
+committed HEAD), then re-run `tools/codex-review.sh` against the updated HEAD (a fresh run dir is
+created automatically — the previous run's evidence is never overwritten).
 
 After all fixes: run full test suite. Paste actual output as evidence (enforcement rule 4).
 

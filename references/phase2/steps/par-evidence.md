@@ -150,9 +150,24 @@ Evidence fields take the `.verdict` string — e.g. `PRODUCT=$(jq -r '.product.v
 Both verdicts must be APPROVE/ACCEPTED/PASS before writing evidence.
 If any agent returned issues, fix and re-run that agent before writing `.par-evidence.json`.
 
+## Verdict Source (mechanical only)
+
+The Codex technical verdict is read from the wrapper's **validated** `verdict.json` — never from
+prose, never from the tail of a log:
+
+```bash
+RUN=$(ls -d .superflow/reviews/sprint-<N>-technical/* | tail -1)
+TECHNICAL=$(jq -r .verdict "$RUN/verdict.json")   # APPROVE | REQUEST_CHANGES | ...
+```
+
+If `verdict.json` does not exist, the review did NOT produce a valid verdict (wrapper exit 1:
+FAILED / TIMED_OUT / malformed fence). That is **not** a pass: do not write `.par-evidence.json`,
+do not open the gate. Diagnose via `$RUN/status.json`, `$RUN/stderr.log`, `$RUN/final.md` and re-run
+the review. See `references/codex-review-wrapper.md`.
+
 ## No Secondary Provider
 
-Technical-lens fallback chain when `codex exec review` is unavailable:
+Technical-lens fallback chain when the Codex wrapper (`tools/codex-review.sh`) is unavailable:
 
 1. **Native `/code-review` skill** — invoke via the Skill tool at `high` effort (technical lens only). Record `provider: "code-review-skill"`.
 2. **Split-focus Claude agents** (last resort when Skill tool also unavailable):

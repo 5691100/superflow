@@ -44,13 +44,21 @@ Recommended Codex config is `[agents] max_threads=6, max_depth=2`. With `max_dep
 
 ## Secondary Provider Inversion
 
+When Claude is the orchestrator, **every** Codex call goes through `tools/codex-review.sh` — never
+raw `codex exec`, never piped into `tail -N`, never with an outer `timeout` (the wrapper owns its
+deadline and its process group). See `references/codex-review-wrapper.md`.
+
 | Context | Claude orchestrator (Codex secondary) | Codex orchestrator (Claude secondary) |
 |---------|---------------------------------------|---------------------------------------|
-| Security audit | `codex exec --full-auto -m gpt-5.6-sol` + `prompts/codex/audit.md` | `claude --model claude-opus-4-8 --effort xhigh -p` + `prompts/claude/audit.md` |
-| Code review | `codex exec review --base main -m gpt-5.6-sol --ephemeral` | spawn_agent technical reviewer |
-| Product review | `codex exec -m gpt-5.6-sol` + `prompts/codex/product-reviewer.md` | `claude --model claude-opus-4-8 --effort xhigh -p` + `prompts/claude/product-reviewer.md` |
-| Spec review | `codex exec --full-auto -m gpt-5.6-sol --ephemeral` | Claude product + spawn_agent technical |
-| Plan review | `codex exec --full-auto -m gpt-5.6-sol --ephemeral` | Claude product + spawn_agent technical |
+| Security audit | `codex-review.sh run --mode exec --slug audit --effort xhigh --prompt-file prompts/codex/audit.md` | `claude --model claude-opus-4-8 --effort xhigh -p` + `prompts/claude/audit.md` |
+| Code review | `codex-review.sh run --slug sprint-<N>-technical --base main --effort high --prompt-file <p>` | spawn_agent technical reviewer |
+| Product review | `codex-review.sh run --mode exec --slug product --effort high --prompt-file prompts/codex/product-reviewer.md` | `claude --model claude-opus-4-8 --effort xhigh -p` + `prompts/claude/product-reviewer.md` |
+| Spec review | `codex-review.sh run --mode exec --slug spec-review --effort high --prompt-file <p>` | Claude product + spawn_agent technical |
+| Plan review | `codex-review.sh run --mode exec --slug plan-review --effort high --prompt-file <p>` | Claude product + spawn_agent technical |
+| Contract gate | `codex-review.sh run --mode exec --slug contract-gate --effort high --prompt-file <contract.yml>` | spawn_agent technical reviewer |
+
+Model defaults to `$CODEX_REVIEW_MODEL` (`gpt-5.6-sol`); override with `--model`. Read the verdict
+from `<run-dir>/verdict.json` (exit 0 = pass-class, 3 = fail-class, 1 = **no valid verdict**, gate CLOSED).
 
 ## Split-Focus Fallback (no secondary provider)
 

@@ -10,8 +10,9 @@ Survives context compaction. SKILL.md does not.
 2b. **State isolation.** `.superflow-state.json` lives in the PROJECT root; `/root/.superflow-state.json` belongs only to runs rooted at `/root`. Never write another project's state file; re-read state immediately before every overwrite (concurrent runs share the machine).
 3. **Unified Review before every PR** (2 agents for standard/critical sprints; single Technical reviewer for light-mode sprints). Review verifies the sprint **contract** (Rule 3a) criterion-by-criterion — not the raw request. (When `context.use_workflows=true`, steps 1-4 may run via the saved `/superflow-review` workflow — see `references/workflow-orchestration.md`; later steps unchanged.)
    1. Dispatch Claude product reviewer (subagent_type: standard-product-reviewer) as a named background agent: `name: sprint-<N>-product-reviewer`, `run_in_background: true`.
-   2. Dispatch secondary technical reviewer — fallback chain: (1) `$TIMEOUT_CMD 600 codex exec review --base main -m gpt-5.6-sol -c model_reasoning_effort=high --ephemeral`; (2) native `/code-review` skill via the Skill tool at high effort; (3) two split-focus Claude agents (Product + Technical). `/code-review ultra` is user-triggered and billed — NEVER launch it; only suggest it to the user as an optional extra gate at Phase 3 pre-merge.
-   3. Verdict contract: every reviewer ends its final message with a fenced `json` block — `{"verdict": "APPROVE|ACCEPTED|PASS|REQUEST_CHANGES|NEEDS_FIXES|FAIL", "findings": [{"severity": "critical|high|medium|low", "file": "...", "line": 0, "scenario": "breakage scenario", "description": "..."}], "summary": "..."}`. Extract the fence (awk/sed → jq) and assemble `.par-evidence.json` mechanically from the verdict fields — no prose parsing.
+   2. Dispatch secondary technical reviewer — fallback chain: (1) **`bash tools/codex-review.sh run --slug sprint-<N>-technical --base main --effort high --prompt-file <prompt.md>`** (the transparent Codex wrapper — NEVER call `codex exec` raw, NEVER pipe it into `tail -N`, NEVER recover its PID with `pgrep`); (2) native `/code-review` skill via the Skill tool at high effort; (3) two split-focus Claude agents (Product + Technical). `/code-review ultra` is user-triggered and billed — NEVER launch it; only suggest it to the user as an optional extra gate at Phase 3 pre-merge.
+   2a. The wrapper owns its own hard deadline — do NOT wrap it in an outer `$TIMEOUT_CMD` (nesting `timeout` around it re-creates the PID confusion this wrapper exists to eliminate). It streams state transitions + heartbeats (elapsed / last-event age / remaining deadline / progress-confirmed) to stdout, and writes `.superflow/reviews/<slug>/<run-id>/` with `events.jsonl`, `final.md`, `stderr.log`, `status.json`, `pid`, `prompt.md`, `verdict.json`. Wrapper exit codes: `0` = valid pass-class verdict, `3` = valid fail-class verdict, `1` = **no valid verdict** (FAILED / TIMED_OUT / malformed) → the review gate stays CLOSED, `2` = usage error. Details: `references/codex-review-wrapper.md`.
+   3. Verdict contract: every reviewer ends its final message with a fenced `json` block — `{"verdict": "APPROVE|ACCEPTED|PASS|REQUEST_CHANGES|NEEDS_FIXES|FAIL", "findings": [{"severity": "critical|high|medium|low", "file": "...", "line": 0, "scenario": "breakage scenario", "description": "..."}], "summary": "..."}`. For Codex, the wrapper has ALREADY extracted and schema-validated that block into `verdict.json` — read `technical_review` from `jq -r .verdict <run-dir>/verdict.json` and never re-parse prose. For Claude agents, extract the fence (awk/sed → jq) the same way. A missing/malformed verdict is an error, never a pass.
    4. Wait for both. Fix confirmed issues (NEEDS_FIXES, REQUEST_CHANGES, or FAIL). Re-engage ONLY the flagging reviewer via SendMessage (its original context intact), scoped to the fix diff + its original findings. Cold re-dispatch is the fallback if the agent is gone.
    5. Run mandatory sprint documentation update (`CLAUDE.md` + `llms.txt`) before PR creation. `llms.txt` must be explicitly checked on every sprint, even if unchanged.
    6. Run documentation review after the update/unchanged decision. It must verify `llms.txt` and `CLAUDE.md` reflect the sprint diff and contain no stale paths/commands.
@@ -20,11 +21,11 @@ Survives context compaction. SKILL.md does not.
    9. Pass verdicts: APPROVE, ACCEPTED, PASS. Fail verdicts: REQUEST_CHANGES, NEEDS_FIXES, FAIL.
    10. **UI sprints** (`review_required.browser: true`): the evaluator runs a black-box browser pass (Playwright/Chrome-MCP — launch app, click the contract's browser-criteria, screenshot, check empty/loading/error states). App first; read code only to explain a failure.
    11. **Artifact sprints** (`review_required.artifact: true`, e.g. steel workbooks): the evaluator runs the artifact pass — execute on golden fixtures, open & reconcile every produced file vs expected. Generalizes the Steel QA Stage 1–3 gate.
-3a. **Contract Gate before implementation.** In Phase 2, after the sprint worktree + baseline tests exist and BEFORE the implementer writes code, the implementer drafts a sprint contract (`docs/superflow/contracts/<date>-<feature>.contract.yml`, template `templates/contract-template.yml`) — concrete, checkable criteria covering product scenarios, edge cases, interface states, and regression/invariants. The **Codex** technical reviewer checks the contract and confirms the criteria are **sufficient** (`gate.contract_agreed: true`) before build starts — run `codex exec` on the contract file (Claude technical reviewer only as fallback when Codex is unavailable/rate-limited). The orchestrator does NOT author criteria — it only blocks the sprint if no Codex-confirmed contract exists. Keep it to one sprint's worth (~5–12 criteria), written just-in-time so it reflects the worktree, not a stale early plan. Unified Review (Rule 3) then checks each `criteria.id` → PASS/FAIL.
+3a. **Contract Gate before implementation.** In Phase 2, after the sprint worktree + baseline tests exist and BEFORE the implementer writes code, the implementer drafts a sprint contract (`docs/superflow/contracts/<date>-<feature>.contract.yml`, template `templates/contract-template.yml`) — concrete, checkable criteria covering product scenarios, edge cases, interface states, and regression/invariants. The **Codex** technical reviewer checks the contract and confirms the criteria are **sufficient** (`gate.contract_agreed: true`) before build starts — run it through **`tools/codex-review.sh`** on the contract file (never raw `codex exec`; Claude technical reviewer only as fallback when Codex is unavailable). The orchestrator does NOT author criteria — it only blocks the sprint if no Codex-confirmed contract exists. Keep it to one sprint's worth (~5–12 criteria), written just-in-time so it reflects the worktree, not a stale early plan. Unified Review (Rule 3) then checks each `criteria.id` → PASS/FAIL.
 4. **Tests with evidence.** Paste actual output before claiming done.
 5. **Re-read phase docs** at each sprint boundary via Read tool.
 6. **Dual-model reviews: specialize, don't duplicate.** Claude = Product lens (spec fit, user scenarios, data integrity). Secondary = Technical lens (correctness, security, architecture). No overlapping roles.
-7. **Technical-lens fallback chain.** (1) `codex exec review`; (2) native `/code-review` skill via the Skill tool at high effort; (3) two split-focus Claude agents — Product (product-reviewer) + Technical (code-quality-reviewer).
+7. **Technical-lens fallback chain.** (1) `bash tools/codex-review.sh` (transparent wrapper — the ONLY sanctioned way to call Codex); (2) native `/code-review` skill via the Skill tool at high effort; (3) two split-focus Claude agents — Product (product-reviewer) + Technical (code-quality-reviewer).
 8. **PR policy follows git workflow mode.** `solo_single_pr` creates one final PR; `sprint_pr_queue`, `stacked_prs`, and `parallel_wave_prs` create PRs per sprint; `trunk_based` creates short-lived PRs per deployable slice; **`local_commit`** (repo with no CI remote, e.g. backup-only) creates NO PRs — sprint branch merges locally to main after the Rule 3 gate passes, then push to the backup remote (durable = commit+push). Execute silently after plan approval.
 8a. **NEVER `gh pr merge --admin`.** Applies to PR modes (repo has a GitHub remote with CI). If CI is red, fix CI first. After every `gh pr create`: Claude runtime — use the native Monitor tool to wait for PR checks to conclude (success/failure); Codex runtime — poll `gh run list` until checks conclude. Green → proceed to merge; red → investigate with `gh run view <id> --log-failed`, fix, push, wait for green again. In `local_commit` mode there is no PR/CI lane — the Rule 3 gate (reviews + PAR + docs) is the merge gate.
 9. **Final Holistic Review — conditional.** Required when: ≥4 sprints, parallel execution, `git_workflow_mode` is `parallel_wave_prs` or `stacked_prs`, or governance_mode="critical". Skip for ≤3 linear sequential sprints in light/standard mode. When required: two reviewers (Claude deep-product + Codex high technical, or 2 split-focus Claude) review ALL code as a unified system. Fix CRITICAL/HIGH before Completion Report.
@@ -37,12 +38,31 @@ Survives context compaction. SKILL.md does not.
 ## Secondary Provider Invocation
 
 **When Claude is orchestrator (RUNTIME:claude):**
+
+ALL external Codex calls go through `tools/codex-review.sh` (feature flag `CODEX_REVIEW_WRAPPER_V2=1`, default ON). It captures the exact `$!` at launch, puts the child in its own process group, streams `codex exec --json` events to disk, heartbeats state, enforces a hard deadline that reaps the whole group, and mechanically validates the fenced-JSON verdict.
+
 ```bash
-$TIMEOUT_CMD 600 codex exec --full-auto -m gpt-5.6-sol -c model_reasoning_effort=<LEVEL> "PROMPT" 2>&1          # general
-$TIMEOUT_CMD 600 codex exec review --base main -m gpt-5.6-sol -c model_reasoning_effort=<LEVEL> --ephemeral "PROMPT" 2>&1  # code review
-$TIMEOUT_CMD 600 $SECONDARY_PROVIDER <non-interactive-flag> "PROMPT" 2>&1                        # Other
+# code review (technical lens) — writes .superflow/reviews/<slug>/<run-id>/{events.jsonl,final.md,status.json,verdict.json,...}
+bash tools/codex-review.sh run --slug <slug> --base main --effort high --prompt-file PROMPT.md
+#   exit 0 = pass-class verdict | 3 = fail-class verdict | 1 = NO valid verdict (gate CLOSED) | 2 = usage
+#   verdict: jq -r .verdict  .superflow/reviews/<slug>/<run-id>/verdict.json
+#   live:    tail -f          .superflow/reviews/<slug>/<run-id>/events.jsonl   (inspecting the log is fine;
+#                                                                                piping the REVIEW into tail is not)
+
+# general (non-review) Codex call — same transparency, plain `codex exec`
+bash tools/codex-review.sh run --slug <slug> --mode exec --effort <LEVEL> --prompt-file PROMPT.md
+
+$TIMEOUT_CMD 600 $SECONDARY_PROVIDER <non-interactive-flag> "PROMPT" 2>&1                        # Other providers
 # No codex → native /code-review skill (Skill tool, high effort) → two Claude agents with split focus (Product + Technical)
 ```
+
+**FORBIDDEN — these caused a 26-day hung wrapper and an unobservable review (2026-06-16 → 2026-07-12):**
+```bash
+timeout 900 codex exec ... 2>&1 | tail -30        # hides the event stream until the pipeline ends
+PID=$(pgrep -f "codex exec.*")                    # can match the parent shell / another review / itself
+tail --pid=$PID -f /dev/null                      # circular wait when $PID is the parent shell
+```
+Do NOT wrap `codex-review.sh` in an outer `timeout` — it owns its deadline. Rollback (`CODEX_REVIEW_WRAPPER_V2=0`) drops the state machine/heartbeat but still keeps the exact `$!`, hard deadline, separate stdout/stderr and recorded exit code — it never reintroduces `pgrep` or `tail --pid`.
 
 **When Codex is orchestrator (RUNTIME:codex):**
 ```bash

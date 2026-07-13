@@ -171,7 +171,10 @@ for _p in \
 done
 
 if [ -n "$AUDIT_PROMPT" ]; then
-  $TIMEOUT_CMD 600 codex exec --full-auto -m gpt-5.6-sol -c model_reasoning_effort=xhigh "$(cat "$AUDIT_PROMPT")" 2>&1
+  # Transparent wrapper only — never raw `codex exec`, never `| tail -N`, never an outer timeout
+  # (it owns its deadline + process group). See references/codex-review-wrapper.md.
+  bash tools/codex-review.sh run --mode exec --slug phase0-audit --effort xhigh \
+    --prompt-file "$AUDIT_PROMPT"
 else
   echo "WARN: prompts/codex/audit.md not found in any skill root — falling back to Claude security agent" >&2
 fi
