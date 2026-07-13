@@ -19,11 +19,15 @@
 # Modes:
 #   normal | tools | silent | hang | failfast                    — process/stream behaviour
 #   malformed | badverdict | noverdict                           — bad final message
-#   trailingbad | truncated | partial                            — fail-OPEN traps for the extractor
+#   trailingbad | truncated | partial | trailingprose            — fail-OPEN traps for the extractor
+#   failafter                                                    — valid APPROVE, then a FAILED run
 #
-# The three traps all plant an EARLIER, perfectly valid APPROVE fence and then ruin the final one.
-# Any extractor that "scans backwards for the last block that parses", or that defaults away a
-# missing schema key, will happily open the gate on all three. They must all be rejected.
+# The traps all hand back something that LOOKS like a pass. `trailingbad`/`truncated`/`partial`
+# plant an earlier, perfectly valid APPROVE fence and then ruin the final one; `trailingprose` gets
+# the fence right and then keeps talking; `failafter` writes a flawless APPROVE and exits nonzero.
+# An extractor that scans backwards for "the last block that parses", that defaults away a missing
+# schema key, that ignores what follows the fence, or that mines a final.md without proving the RUN
+# succeeded, will open the gate on all of them. Every one must be rejected.
 
 set -u
 
@@ -167,6 +171,19 @@ Final verdict:
 {"verdict":"APPROVE"}
 ```'
     ;;
+  trailingprose)
+    # A PERFECTLY VALID APPROVE fence — and then the model kept talking. It either contradicted
+    # itself or was cut off mid-correction. The contract says the verdict fence is the LAST thing in
+    # the message, so this is not a verdict: honouring the fence and ignoring the tail INFERS a pass
+    # from an unfinished answer. (r2 finding 1.)
+    FINAL='Review done.
+
+```json
+{"verdict":"APPROVE","findings":[],"summary":"looks good"}
+```
+
+Wait — on reflection the auth check at line 42 is still broken, so this should be'
+    ;;
   *)
     # Two fenced blocks on purpose: the extractor must take the LAST one (§7),
     # never the earlier decoy, and never the surrounding prose.
@@ -187,6 +204,15 @@ esac
 
 if [ -n "$OUT" ]; then
   printf '%s\n' "$FINAL" > "$OUT"
+fi
+
+# --- failafter: the provider wrote a clean, perfectly valid APPROVE final message and THEN DIED —
+#     rate limit, broker drop, panic on shutdown. The event stream even shows turn.completed. The
+#     ANSWER looks like a pass; the RUN failed. Anything that mines that final.md is inferring a
+#     pass from a run that never succeeded, which is the whole class of bug in review r2.
+if [ "$FAKE_MODE" = "failafter" ]; then
+  echo "error: stream disconnected before completion" >&2
+  exit 2
 fi
 
 exit 0

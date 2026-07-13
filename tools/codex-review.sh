@@ -154,17 +154,21 @@ group_alive() { local m; m="$(group_members "$1")"; [ -n "$m" ]; }
 # verdict.json contract check (AC09). The file is EVIDENCE, so it is re-validated on every read
 # rather than trusted because some status.json says VERDICT_PARSED. Echoes pass|fail; a file that
 # does not satisfy the full contract produces NO output and a non-zero exit — never a class.
+#
+# The optional second argument pins the verdict to a RUN: a verdict.json whose run_id belongs to
+# some other run is not this run's answer, no matter how well-formed it is (r2 F11).
 # ---------------------------------------------------------------------------
 verdict_class_of() {
-  local f="${1:-}"
+  local f="${1:-}" want_run="${2:-}"
   [ -n "$f" ] && [ -s "$f" ] || return 1
-  jq -er '
+  jq -er --arg want "$want_run" '
     def passes: ["APPROVE","ACCEPTED","PASS"];
     def fails:  ["REQUEST_CHANGES","NEEDS_FIXES","FAIL"];
     if (type == "object")
        and ((.verdict?  | type) == "string")
        and ((.findings? | type) == "array")
        and ((.summary?  | type) == "string")
+       and ($want == "" or ((.run_id? // "") == $want))
     then ((.verdict | ascii_upcase) as $v |
           if   (passes | index($v)) and (.verdict_class == "pass") and (.gate == "open")
           then "pass"
@@ -172,6 +176,84 @@ verdict_class_of() {
           then "fail"
           else empty end)
     else empty end' "$f" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Terminal failure, replayed from the APPEND-ONLY event stream rather than from a status field that
+# a wrapper killed mid-drain never got to write (r2 F10).
+#
+# An `error` ITEM ({"type":"item.completed","item":{"type":"error"}}) is deliberately NOT a failure:
+# the real CLI emits one (a config deprecation notice) on fully successful exit-0 runs, and T8 pins
+# that. Only a TOP-LEVEL error event or a turn.failed says the turn itself did not succeed — the
+# anchor is what keeps the two apart. Over-matching here would only ever CLOSE the gate.
+# ---------------------------------------------------------------------------
+events_show_failure() {
+  local f="$RUN_DIR/events.jsonl"
+  [ -s "$f" ] || return 1
+  grep -qE '"type"[[:space:]]*:[[:space:]]*"turn\.failed"' "$f" && return 0
+  grep -qE '^[[:space:]]*\{[[:space:]]*"type"[[:space:]]*:[[:space:]]*"error"' "$f" && return 0
+  return 1
+}
+
+# ---------------------------------------------------------------------------
+# RUN PROVENANCE (r2 F9/F10/F11) — a PASS must be PROVEN, not inferred.
+#
+# A verdict is only usable if the run that produced it is provably a SUCCESSFUL run. Until now the
+# verdict was treated as self-standing evidence: a final.md containing "APPROVE" could be mined out
+# of a run whose provider had exited 2, whose turn had failed, or which had timed out — the answer
+# looked clean, so the gate opened. The answer is not the run. Every clause below is read off a
+# durable artifact; nothing is inferred from a state field alone:
+#
+#   1. the recorded state is not a terminal FAILURE (FAILED / TIMED_OUT). A terminal failure
+#      OUTRANKS any stored verdict, so it is checked BEFORE the verdict is even looked at (F11).
+#   2. the provider's exit code was actually RECORDED, and it is 0. `null` means nobody ever saw
+#      the process exit — that is the ABSENCE of proof, not proof of success (F9/F10).
+#   3. the event stream shows no failed turn — replayed from events.jsonl, not from status.json,
+#      because a crashed wrapper never wrote it there (F10).
+#   4. final.md exists, is non-empty, and was not written BEFORE the run started — a leftover or
+#      injected final message from another run is not this run's answer (F10).
+#
+# Sets PROVENANCE_ERROR and returns 1 at the first missing proof.
+# ---------------------------------------------------------------------------
+verify_provenance() {
+  PROVENANCE_ERROR=""
+  case "${STATE:-}" in
+    FAILED|TIMED_OUT)
+      PROVENANCE_ERROR="recorded state is $STATE — a terminal failure outranks any stored verdict"
+      return 1 ;;
+  esac
+  if [ -z "${EXIT_CODE:-}" ] || [ "$EXIT_CODE" = "null" ]; then
+    PROVENANCE_ERROR="no provider exit code was ever recorded — the run's success is unproven"
+    return 1
+  fi
+  if [ "$EXIT_CODE" != "0" ]; then
+    PROVENANCE_ERROR="provider exited with code $EXIT_CODE — a failed run cannot yield a usable verdict"
+    return 1
+  fi
+  if events_show_failure; then
+    PROVENANCE_ERROR="events.jsonl records a failed turn — the review turn did not succeed"
+    return 1
+  fi
+  if [ ! -s "$RUN_DIR/final.md" ]; then
+    PROVENANCE_ERROR="final.md is missing or empty — there is no final message to trust"
+    return 1
+  fi
+  local mt; mt="$(stat -c %Y "$RUN_DIR/final.md" 2>/dev/null || echo 0)"
+  if [ "${mt:-0}" -lt "${STARTED:-0}" ] 2>/dev/null; then
+    PROVENANCE_ERROR="final.md predates the run (mtime $mt < start $STARTED) — leftover or injected, not this run's answer"
+    return 1
+  fi
+  return 0
+}
+
+# A verdict we refuse to honour must stop being a USABLE verdict — .par-evidence.json is built from
+# verdict.json, so leaving an unusable one on disk is exactly how a rejected run opens a gate. It is
+# still evidence, though (F5), so it is MOVED aside for forensics, never deleted.
+quarantine_verdict() {
+  [ -e "$RUN_DIR/verdict.json" ] || return 0
+  mv -f "$RUN_DIR/verdict.json" "$RUN_DIR/verdict.rejected.json" 2>/dev/null
+  recovery_note "verdict.json REJECTED, quarantined to verdict.rejected.json — $1"
+  printf '  -> stored verdict.json is NOT usable (%s) — quarantined to verdict.rejected.json\n' "$1"
 }
 
 # ---------------------------------------------------------------------------
@@ -542,6 +624,17 @@ if len(fences) % 2:
 # The LAST closed fence MUST be the verdict. The reviewer contract says nothing may follow the
 # verdict fence, so we do NOT scan backwards for "the most recent block that happens to parse":
 # a garbled or truncated last block is a FAILED review, never a fallback to an earlier APPROVE.
+#
+# And "nothing may follow" is enforced literally: a model that emits a clean APPROVE fence and then
+# keeps talking ("Wait — actually the auth check is still broken…") has NOT delivered a verdict. It
+# contradicted itself, or it was cut off mid-correction. Either way the message is not a verdict,
+# and treating the earlier fence as one INFERS a pass instead of proving it. Only whitespace may
+# follow the closing fence.
+trailing = "\n".join(lines[fences[-1] + 1:])
+if trailing.strip():
+    fail("non-whitespace content follows the verdict fence — the verdict must be the LAST thing "
+         "in final.md (got %r…)" % trailing.strip()[:60])
+
 block = "\n".join(lines[fences[-2] + 1: fences[-1]])
 try:
     chosen = json.loads(block)
@@ -703,9 +796,11 @@ cmd_run() {
     wait "$PID" 2>/dev/null; EXIT_CODE=$?
     [ "$STATE" != "TIMED_OUT" ] && STATE="COMPLETED"
     write_status
-    if [ "$STATE" = "COMPLETED" ] && [ "$EXIT_CODE" = "0" ] && extract_verdict >/dev/null 2>&1; then
+    # Same provenance gate as the V2 path: the rollback flag drops the state machine, never the
+    # requirement that a pass be PROVEN (AC14).
+    if [ "$STATE" = "COMPLETED" ] && verify_provenance && extract_verdict >/dev/null 2>&1; then
       set_state VERDICT_PARSED "verdict extracted (fallback)"
-      [ "$(jq -r .verdict_class "$RUN_DIR/verdict.json")" = "pass" ] && return 0 || return 3
+      [ "$(verdict_class_of "$RUN_DIR/verdict.json" "$RUN_ID")" = "pass" ] && return 0 || return 3
     fi
     return 1
   fi
@@ -791,11 +886,24 @@ cmd_run() {
 
   set_state COMPLETED "codex exited 0; final message received"
 
+  # One gate, both paths: `run` proves the run succeeded before it will extract a verdict from it,
+  # exactly as `reconcile` does. A re-check can then never be more OPTIMISTIC than the original run,
+  # and the original run can never be more optimistic than the evidence (r2 F9/F10).
+  if ! verify_provenance; then
+    set_state FAILED "run provenance not proven: $PROVENANCE_ERROR"
+    VERDICT_ERROR="$PROVENANCE_ERROR"
+    heartbeat; finish_report; return 1
+  fi
+
   local v
   if v="$(extract_verdict 2>"$RUN_DIR/.verdict.err")"; then
     set_state VERDICT_PARSED "verdict extracted and validated: $v"
     heartbeat; finish_report
-    [ "$(jq -r .verdict_class "$RUN_DIR/verdict.json" 2>/dev/null)" = "pass" ] && return 0 || return 3
+    case "$(verdict_class_of "$RUN_DIR/verdict.json" "$RUN_ID")" in
+      pass) return 0 ;;
+      fail) return 3 ;;
+      *)    return 1 ;;   # written but not re-validatable — fail closed
+    esac
   else
     VERDICT_ERROR="$(cat "$RUN_DIR/.verdict.err" 2>/dev/null | tr -d '\n' | cut -c1-300)"
     # final.md is deliberately preserved for diagnosis (§7.5)
@@ -878,39 +986,41 @@ cmd_reconcile() {
     recovery_note "reconcile: recorded pid $PID is not ours ($VERIFY_ERROR); not signalled"
   fi
 
-  # ---- the process is gone (or was never ours): judge the run by its artifacts alone ----
-
-  # A stored verdict.json is EVIDENCE, not a certificate: re-validate it against the full contract
-  # instead of believing a `state: VERDICT_PARSED` field. A truncated, hand-edited or half-written
-  # verdict file must not open the gate just because some earlier status said it was fine.
-  local cls=""
-  if [ -e "$RUN_DIR/verdict.json" ]; then
-    cls="$(verdict_class_of "$RUN_DIR/verdict.json")"
-    if [ -z "$cls" ]; then
-      rm -f "$RUN_DIR/verdict.json"
-      recovery_note "reconcile: stored verdict.json failed the contract and was REMOVED (gate CLOSED)"
-      printf '  -> stored verdict.json does NOT satisfy the verdict contract — removed.\n'
-    fi
+  # ---- the process is gone (or was never ours): judge the run by its ARTIFACTS ----
+  #
+  # ORDER MATTERS (r2 F11). The run's STATE and PROVENANCE are established FIRST; only a run that is
+  # proven to have succeeded may have a verdict honoured or mined out of it. Reading the stored
+  # verdict first — as this used to — means a TIMED_OUT or exit-2 run that happens to hold an
+  # APPROVE returns 0. The verdict is not the run.
+  if ! verify_provenance; then
+    printf '  -> run is NOT usable: %s\n' "$PROVENANCE_ERROR"
+    quarantine_verdict "$PROVENANCE_ERROR"
+    case "$STATE" in
+      FAILED|TIMED_OUT) : ;;   # already terminal — keep the accurate label, rewrite nothing
+      *) set_state FAILED "reconcile: unusable run — $PROVENANCE_ERROR" ;;
+    esac
+    recovery_note "reconcile: gate CLOSED — $PROVENANCE_ERROR"
+    printf '  -> FAILED (gate CLOSED — a PASS must be proven, not inferred)\n'
+    return 1
   fi
 
-  # Nothing valid on record? Try to re-derive it from final.md — but ONLY for a run that was not
-  # already declared dead. A TIMED_OUT or FAILED run was killed or errored out, so whatever sits in
-  # its final.md is the tail of a review that never finished; promoting that to a verdict is exactly
-  # the fail-open this wrapper exists to prevent. Anything that is not VERDICT_PARSED exits non-zero.
-  if [ -z "$cls" ] && [ -s "$RUN_DIR/final.md" ]; then
-    case "$STATE" in
-      TIMED_OUT|FAILED)
-        printf '  -> recorded state is %s — refusing to mine a verdict out of a review that did not complete.\n' "$STATE"
-        ;;
-      *)
-        if extract_verdict >/dev/null 2>"$RUN_DIR/.verdict.err"; then
-          cls="$(verdict_class_of "$RUN_DIR/verdict.json")"
-          recovery_note "reconcile: recovered verdict from final.md after wrapper crash ($cls)"
-        else
-          VERDICT_ERROR="$(tr -d '\n' < "$RUN_DIR/.verdict.err" 2>/dev/null | cut -c1-300)"
-        fi
-        ;;
-    esac
+  # Provenance is proven: the provider exited 0, no turn failed, and final.md belongs to this run.
+  # Only NOW may a verdict be honoured — and it is still re-validated against the full contract and
+  # PINNED to this run_id, because a well-formed verdict from another run is not this run's answer.
+  local cls=""
+  if [ -e "$RUN_DIR/verdict.json" ]; then
+    cls="$(verdict_class_of "$RUN_DIR/verdict.json" "$RUN_ID")"
+    [ -z "$cls" ] && quarantine_verdict "fails the verdict contract, or belongs to a different run"
+  fi
+
+  # Nothing usable on record: re-derive it from this run's own final.md (the crash-recovery path).
+  if [ -z "$cls" ]; then
+    if extract_verdict >/dev/null 2>"$RUN_DIR/.verdict.err"; then
+      cls="$(verdict_class_of "$RUN_DIR/verdict.json" "$RUN_ID")"
+      recovery_note "reconcile: verdict re-derived from final.md of a provably successful run ($cls)"
+    else
+      VERDICT_ERROR="$(tr -d '\n' < "$RUN_DIR/.verdict.err" 2>/dev/null | cut -c1-300)"
+    fi
   fi
 
   if [ "$cls" = "pass" ]; then

@@ -12,6 +12,12 @@
 #   12 cleanup verifies the GROUP's identity before signalling it         (F4)
 #   13 recovery preserves the event stream and the recorded evidence      (F5)
 #   14 the rollback flag (CODEX_REVIEW_WRAPPER_V2=0) is still fail-closed (AC14)
+# …plus the review r2 regressions — four faces of ONE bug: a PASS was being INFERRED from an answer
+# that looks clean, instead of PROVEN from a run that demonstrably succeeded:
+#   15 content after the verdict fence is not a verdict                    (r2 #1)
+#   16 a nonzero provider exit can never yield a usable verdict            (r2 #2)
+#   17 crash recovery demands proof of success, not absence of bad news    (r2 #3)
+#   18 terminal state + provenance outrank a stored pass verdict           (r2 #4)
 #
 # Hermetic: never invokes the real `codex` CLI or the network. All runs use
 # tools/test-fixtures/fake-codex.sh, which replays the real 0.144.1 JSONL grammar.
@@ -725,9 +731,198 @@ t14() {
 }
 
 # ---------------------------------------------------------------------------
+# Review-r2 regressions (T15–T18). All four are the SAME bug wearing four hats: a PASS was being
+# INFERRED (from an answer that looks clean) instead of PROVEN (from a run that demonstrably
+# succeeded). Each test therefore asserts the same thing — in this situation, a pass must be
+# UNPROVABLE — and each one passed against the previous commit only because nobody asked.
+#
+# `mk_evidence_fixture <dir> <state> <exit_code-json>` builds a run dir by hand: this is INJECTED /
+# CRASH-DAMAGED evidence, the kind a live fake-codex run cannot produce, and it is exactly what a
+# recovery path must survive. pid is null, so the run reads as "process gone" and reconcile goes
+# straight to judging the artifacts. started_at is old, so a freshly written final.md is NEWER than
+# the run (isolating the checks under test from the mtime check).
+# ---------------------------------------------------------------------------
+GOOD_FENCE='Review done.
+
+```json
+{"verdict":"APPROVE","findings":[],"summary":"looks good"}
+```'
+
+mk_evidence_fixture() {   # <dir> <state> <exit_code-json>
+  mkdir -p "$1"
+  jq -n --arg id "inj-$(basename "$1")" --arg st "$2" --argjson ec "$3" \
+    '{run_id:$id, slug:"r2", state:$st, pid:null, pgid:null, start_ticks:null,
+      cmdline_marker:null, started_at:"2026-01-01T00:00:00Z", deadline_at:"2026-01-01T00:15:00Z",
+      exit_code:$ec, progress_confirmed:true, events_seen:3, tools_active:0,
+      thread_id:"thr_inj", orphans_left:0, elapsed_sec:12, message:"", cli_errors:[],
+      wrapper_version:"2.0.0"}' > "$1/status.json"
+  printf '%s\n' '{"type":"thread.started","thread_id":"thr_inj"}' \
+                '{"type":"turn.started"}' \
+                '{"type":"turn.completed","usage":{}}' > "$1/events.jsonl"
+  printf '%s\n' "$GOOD_FENCE" > "$1/final.md"
+}
+
+# ---------------------------------------------------------------------------
+# T15 — r2 #1: content after the verdict fence. The reviewer said APPROVE and then kept talking:
+#       it contradicted itself, or it was cut off mid-correction. Either way the message is not a
+#       verdict, and honouring the fence while ignoring the tail infers a pass from an unfinished
+#       answer. Only whitespace may follow the closing fence.
+# ---------------------------------------------------------------------------
+t15() {
+  head_ T15 "trailing content after the verdict fence -> gate CLOSED (r2 #1)"
+  local root="$TMPROOT/t15"; mkdir -p "$root"; local rd
+
+  CODEX_BIN="$FAKE" FAKE_MODE=trailingprose \
+    timeout 40 bash "$WRAPPER" run --slug g1 --root "$root" --mode exec \
+      --prompt-file "$(pfile "$root/p" "p")" --no-heartbeat >"$root/a.txt" 2>&1
+  assert_eq 1 "$?" "T15a APPROVE fence + trailing prose -> exit 1"
+  rd="$(rundir "$root" g1)"
+  assert_eq "FAILED" "$(state "$rd")" "T15a state FAILED"
+  assert_absent "$rd/verdict.json" "T15a the valid-but-not-final APPROVE fence is NOT used"
+  assert_contains "$root/a.txt" "gate:       CLOSED" "T15a gate reported CLOSED"
+  assert_file "$rd/final.md" "T15a final.md preserved for diagnosis"
+
+  # Whitespace after the fence is FINE — the gate is fail-closed, not fail-paranoid. A model that
+  # ends with a trailing blank line or two has still delivered its verdict last.
+  CODEX_BIN="$FAKE" FAKE_MODE=normal FAKE_FINAL_TEXT='ok
+
+```json
+{"verdict":"APPROVE","findings":[],"summary":"trailing whitespace only"}
+```
+
+   ' \
+    timeout 40 bash "$WRAPPER" run --slug g2 --root "$root" --mode exec \
+      --prompt-file "$(pfile "$root/p2" "p")" --no-heartbeat >"$root/b.txt" 2>&1
+  assert_eq 0 "$?" "T15b trailing WHITESPACE after the fence is still a valid verdict (exit 0)"
+}
+
+# ---------------------------------------------------------------------------
+# T16 — r2 #2: a nonzero provider exit with a flawless APPROVE in final.md. Codex reproduced this
+#       exactly: provider exit 2, `run` exit 1 — and then `reconcile` mined the APPROVE, returned 0
+#       and set VERDICT_PARSED. The answer is not the run.
+# ---------------------------------------------------------------------------
+t16() {
+  head_ T16 "nonzero provider exit can never yield a usable verdict (r2 #2)"
+  local root="$TMPROOT/t16"; mkdir -p "$root"; local rd
+
+  # (a) a real run: the provider writes a valid APPROVE final.md and THEN exits 2.
+  CODEX_BIN="$FAKE" FAKE_MODE=failafter \
+    timeout 40 bash "$WRAPPER" run --slug x1 --root "$root" --mode exec \
+      --prompt-file "$(pfile "$root/p" "p")" --no-heartbeat >"$root/a.txt" 2>&1
+  assert_eq 1 "$?" "T16a run exits 1 despite a valid APPROVE in final.md"
+  rd="$(rundir "$root" x1)"
+  assert_eq "FAILED" "$(state "$rd")" "T16a state FAILED"
+  assert_eq "2" "$(jqf "$rd/status.json" .exit_code)" "T16a provider exit 2 recorded"
+  assert_contains "$rd/final.md" '"verdict":"APPROVE"' "T16a final.md really does hold a clean APPROVE"
+  assert_absent "$rd/verdict.json" "T16a run refuses to extract a verdict from a failed run"
+
+  # (b) …and re-checking the same run dir must be no more optimistic. THIS is what returned 0.
+  timeout 30 bash "$WRAPPER" reconcile "$rd" >"$root/rec.txt" 2>&1
+  assert_eq 1 "$?" "T16b reconcile exits 1 on the same run (never mines the APPROVE)"
+  assert_absent "$rd/verdict.json" "T16b reconcile produced no verdict.json"
+  assert_contains "$root/rec.txt" "gate CLOSED" "T16b reconcile says gate CLOSED"
+
+  # (c) the exit code alone must be disqualifying — isolated from the state check. A crash-damaged
+  #     status.json claiming COMPLETED, with exit_code 2 and a clean APPROVE sitting in final.md.
+  mk_evidence_fixture "$root/exit2" COMPLETED 2
+  timeout 30 bash "$WRAPPER" reconcile "$root/exit2" >"$root/c.txt" 2>&1
+  assert_eq 1 "$?" "T16c COMPLETED + exit_code 2 + valid APPROVE -> exit 1"
+  assert_absent "$root/exit2/verdict.json" "T16c no verdict mined from a nonzero-exit run"
+  assert_contains "$root/c.txt" "provider exited with code 2" "T16c the refusal names the exit code"
+}
+
+# ---------------------------------------------------------------------------
+# T17 — r2 #3: crash recovery without durable proof of success. `load_run_metadata` resets the live
+#       TURN_FAILED flag and a killed wrapper never wrote its exit code, so an interrupted FAILURE
+#       could be recovered as a pass. Recovery must demand proof, not the absence of bad news.
+# ---------------------------------------------------------------------------
+t17() {
+  head_ T17 "crash recovery refuses to mine final.md without proof the run succeeded (r2 #3)"
+  local root="$TMPROOT/t17"; mkdir -p "$root"
+
+  # (a) no exit code was ever recorded: the wrapper was killed before it saw the child exit. The
+  #     absence of a recorded failure is NOT proof of success.
+  mk_evidence_fixture "$root/noexit" MODEL_WAIT null
+  timeout 30 bash "$WRAPPER" reconcile "$root/noexit" >"$root/a.txt" 2>&1
+  assert_eq 1 "$?" "T17a exit_code null + valid APPROVE -> exit 1 (unproven run)"
+  assert_absent "$root/noexit/verdict.json" "T17a nothing mined without a recorded exit code"
+  assert_contains "$root/a.txt" "no provider exit code" "T17a the refusal names the missing proof"
+
+  # (b) the append-only event stream records turn.failed, but the crashed wrapper never got to
+  #     write that into status.json. Recovery must REPLAY the stream, not trust the status field.
+  mk_evidence_fixture "$root/turnfail" COMPLETED 0
+  printf '%s\n' '{"type":"turn.failed","error":{"message":"provider error"}}' >> "$root/turnfail/events.jsonl"
+  timeout 30 bash "$WRAPPER" reconcile "$root/turnfail" >"$root/b.txt" 2>&1
+  assert_eq 1 "$?" "T17b turn.failed in events.jsonl -> exit 1 even with exit_code 0"
+  assert_absent "$root/turnfail/verdict.json" "T17b no verdict mined from a failed turn"
+  assert_contains "$root/b.txt" "failed turn" "T17b the refusal names the failed turn"
+
+  # (c) final.md predates the run: a leftover or injected answer from somewhere else. Size and
+  #     mtime must be consistent with a run that actually produced it.
+  mk_evidence_fixture "$root/stale" COMPLETED 0
+  touch -d '2020-01-01T00:00:00Z' "$root/stale/final.md"
+  timeout 30 bash "$WRAPPER" reconcile "$root/stale" >"$root/c.txt" 2>&1
+  assert_eq 1 "$?" "T17c final.md older than the run -> exit 1 (not this run's answer)"
+  assert_absent "$root/stale/verdict.json" "T17c no verdict mined from a stale final.md"
+
+  # (d) the control: identical evidence, all proofs present -> the gate DOES open. Without this the
+  #     three refusals above could be passing for the wrong reason.
+  mk_evidence_fixture "$root/good" COMPLETED 0
+  timeout 30 bash "$WRAPPER" reconcile "$root/good" >"$root/d.txt" 2>&1
+  assert_eq 0 "$?" "T17d control: a provably successful run still recovers its APPROVE (exit 0)"
+  assert_eq "APPROVE" "$(jqf "$root/good/verdict.json" .verdict)" "T17d control: verdict recovered"
+}
+
+# ---------------------------------------------------------------------------
+# T18 — r2 #4: a stored pass-class verdict.json was accepted BEFORE the run's state and provenance
+#       were checked, so stale or injected evidence could make a failed run return 0. Terminal
+#       failure outranks any verdict, and a verdict from another run is not this run's answer.
+# ---------------------------------------------------------------------------
+t18() {
+  head_ T18 "terminal state and provenance outrank a stored pass verdict (r2 #4)"
+  local root="$TMPROOT/t18"; mkdir -p "$root"
+
+  # a complete, contract-perfect, pass-class verdict.json — the strongest possible fake
+  mk_pass_verdict() {   # <dir>
+    jq -n --arg id "inj-$(basename "$1")" \
+      '{run_id:$id, verdict:"APPROVE", verdict_class:"pass", gate:"open", findings:[],
+        findings_count:0, summary:"stored pass", source:"final.md",
+        extracted_at:"2026-01-01T00:10:00Z"}' > "$1/verdict.json"
+  }
+
+  # (a) TIMED_OUT run holding a perfect APPROVE. The kill is the truth; the verdict is not.
+  mk_evidence_fixture "$root/timedout" TIMED_OUT 124
+  mk_pass_verdict "$root/timedout"
+  timeout 30 bash "$WRAPPER" reconcile "$root/timedout" >"$root/a.txt" 2>&1
+  assert_eq 1 "$?" "T18a TIMED_OUT + stored APPROVE -> exit 1 (never 0)"
+  assert_absent "$root/timedout/verdict.json" "T18a the stored pass verdict is no longer usable"
+  assert_file "$root/timedout/verdict.rejected.json" "T18a …but it is quarantined, not destroyed (F5)"
+  assert_contains "$root/a.txt" "terminal failure outranks" "T18a the refusal explains the precedence"
+
+  # (b) same, for a FAILED run that even records a clean exit 0.
+  mk_evidence_fixture "$root/failed" FAILED 0
+  mk_pass_verdict "$root/failed"
+  timeout 30 bash "$WRAPPER" reconcile "$root/failed" >"$root/b.txt" 2>&1
+  assert_eq 1 "$?" "T18b FAILED + stored APPROVE -> exit 1"
+  assert_absent "$root/failed/verdict.json" "T18b the stored pass verdict is no longer usable"
+
+  # (c) a contract-perfect APPROVE that belongs to a DIFFERENT run (copied/injected verdict.json).
+  #     final.md carries no verdict, so once the foreign one is rejected nothing can be re-derived:
+  #     if the run_id were not checked, this would return 0.
+  mk_evidence_fixture "$root/foreign" VERDICT_PARSED 0
+  printf 'Prose only. I approve. APPROVE.\n' > "$root/foreign/final.md"
+  mk_pass_verdict "$root/foreign"
+  jq '.run_id = "some-other-run"' "$root/foreign/verdict.json" > "$root/foreign/v.tmp" \
+    && mv "$root/foreign/v.tmp" "$root/foreign/verdict.json"
+  timeout 30 bash "$WRAPPER" reconcile "$root/foreign" >"$root/c.txt" 2>&1
+  assert_eq 1 "$?" "T18c a pass verdict from ANOTHER run is not this run's answer -> exit 1"
+  assert_absent "$root/foreign/verdict.json" "T18c the foreign verdict is quarantined"
+}
+
+# ---------------------------------------------------------------------------
 run_all() {
   local t
-  for t in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
+  for t in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18; do
     if want "$t" && declare -F "t$t" >/dev/null; then "t$t"; fi
   done
 }
