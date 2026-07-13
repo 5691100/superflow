@@ -22,9 +22,20 @@
 #   - heartbeat with elapsed / last-event age / remaining deadline            (AC05)
 #   - mechanical fenced-JSON verdict extraction + schema validation           (AC06, AC09)
 #   - silence is reported as silence, never as confirmed progress             (AC07)
-#   - hard deadline kills the whole process group — no orphans                (AC08)
-#   - PID-reuse safe cleanup (PID + starttime tuple must match)               (AC11)
-#   - prompt passed via file/stdin, never argv                                (AC12)
+#   - hard deadline KILLs the whole process group — no orphans                (AC08)
+#   - cleanup verifies the group is really ours before signalling it          (AC11)
+#   - prompt passed via file/stdin, never argv; artifacts are 0700/0600       (AC12)
+#
+# FAIL-CLOSED, EVERYWHERE. Every defect this wrapper has ever had was the same defect: something
+# that was NOT a pass got reported as one. So:
+#   - the verdict is the LITERAL LAST fenced block of final.md. Not "the last block that happens
+#     to parse" — an earlier valid APPROVE followed by a garbled or TRUNCATED final block is a
+#     failed review, not an approval.
+#   - all three contract fields (verdict, findings, summary) are mandatory. Nothing is defaulted.
+#   - `reconcile` re-validates the stored verdict against that same contract and exits non-zero
+#     for every fail-class verdict and every state that is not VERDICT_PARSED. A REQUEST_CHANGES
+#     run must look like a failure to EVERY caller, including a later re-check.
+#   - `cleanup` refuses to signal a process group it cannot tie to this run.
 #
 # USAGE
 #   bash tools/codex-review.sh run --slug <slug> [options]
@@ -36,19 +47,20 @@
 #     --root <dir>        repo root that holds .superflow/         (default: cwd)
 #     --mode exec|review  `codex exec` or `codex exec review`      (default: review)
 #     --base <branch>     base branch for review mode              (default: main)
-#     --prompt-file <f>   prompt from a file      \
-#     --prompt-text <s>   prompt from a string     |  exactly one; the prompt is ALWAYS
-#     --prompt-stdin      prompt from stdin       /   handed to codex via a file on stdin
+#     --prompt-file <f>   prompt from a file    \  exactly one. The prompt is ALWAYS materialised
+#     --prompt-stdin      prompt from stdin     /  to prompt.md and handed to codex on stdin.
+#                         (--prompt-text was REMOVED: prompt content in argv is world-readable
+#                          via /proc/<pid>/cmdline — AC12.)
 #     --model <m>         (default: $CODEX_REVIEW_MODEL or gpt-5.6-sol)
 #     --effort <e>        model_reasoning_effort  (default: $CODEX_REVIEW_EFFORT or high)
 #     --deadline-sec/--silent-sec/--stall-sec/--heartbeat-sec/--grace-sec
 #     --no-heartbeat      suppress heartbeat lines on stdout
 #     -- <args...>        extra args passed verbatim to codex
 #
-# EXIT CODES
-#   0  VERDICT_PARSED, verdict is pass-class  (APPROVE | ACCEPTED | PASS)      -> gate OPEN
+# EXIT CODES  (identical for `run` and `reconcile` — a re-check can never be more optimistic)
+#   0  VERDICT_PARSED, verdict is pass-class  (APPROVE | ACCEPTED | PASS)        -> gate OPEN
 #   3  VERDICT_PARSED, verdict is fail-class  (REQUEST_CHANGES|NEEDS_FIXES|FAIL) -> gate CLOSED
-#   1  no valid verdict: FAILED | TIMED_OUT | malformed/missing verdict        -> gate CLOSED
+#   1  no valid verdict: FAILED | TIMED_OUT | SILENT | malformed/missing verdict -> gate CLOSED
 #   2  usage error
 #   A missing or malformed verdict is NEVER a pass (AC09) — it exits 1, and .par-evidence.json
 #   must be built only from a validated verdict.json.
@@ -62,6 +74,11 @@
 # No secrets are read, printed, or persisted. The prompt is written to the run dir only.
 
 set -uo pipefail
+
+# A run dir holds the prompt (unreleased code), the full transcript and the findings. None of it
+# is anyone else's business: 0700 dirs, 0600 files — including the artifacts the codex child
+# writes itself, which inherit this umask across the fork (AC12).
+umask 077
 
 WRAPPER_VERSION="2.0.0"
 
@@ -106,11 +123,127 @@ starttime_of() {
 }
 alive() { kill -0 "$1" 2>/dev/null; }
 
-# Is ANY *live* (non-zombie) process still a member of process group <pgid>?
-# Zombies must be excluded: our own child stays a zombie until we `wait` it, and a zombie is
-# still signalable — using `kill -0 -PGID` here would report a fully-reaped group as alive.
-group_alive() {
-  ps -eo pgid=,stat= 2>/dev/null | awk -v g="$1" '$1==g && $2 !~ /^Z/ {f=1} END{exit !f}'
+# The full command line of a process, BY PID. Used to prove that a live process really is the
+# codex run we recorded — never to FIND a process (that is what pgrep did, and it is banned).
+cmdline_of() { tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null; }
+
+# Live (non-zombie) members of process group <pgid>, read straight from /proc. Selection is by
+# NUMERIC pgid, never by name. Zombies are excluded: our own child stays a zombie until we `wait`
+# it, and a zombie is still signalable, so counting it would report a fully-reaped group as alive.
+# Fork-free: one `read` builtin per /proc entry, no `ps`/`awk` per process.
+group_members() {
+  local pgid="${1:-}" f pid line rest
+  case "$pgid" in ''|null|0) return 0 ;; esac
+  for f in /proc/[0-9]*/stat; do
+    [ -r "$f" ] || continue
+    IFS= read -r line < "$f" 2>/dev/null || continue
+    rest="${line##*) }"   # drop "pid (comm) " — comm itself may hold spaces and parens
+    # shellcheck disable=SC2086  # deliberate split: $1=state $2=ppid $3=pgrp … $20=starttime
+    set -- $rest
+    [ "${1:-}" = "Z" ] && continue
+    if [ "${3:-}" = "$pgid" ]; then
+      pid="${f#/proc/}"; pid="${pid%/stat}"
+      printf '%s\n' "$pid"
+    fi
+  done
+  return 0
+}
+group_alive() { local m; m="$(group_members "$1")"; [ -n "$m" ]; }
+
+# ---------------------------------------------------------------------------
+# verdict.json contract check (AC09). The file is EVIDENCE, so it is re-validated on every read
+# rather than trusted because some status.json says VERDICT_PARSED. Echoes pass|fail; a file that
+# does not satisfy the full contract produces NO output and a non-zero exit — never a class.
+# ---------------------------------------------------------------------------
+verdict_class_of() {
+  local f="${1:-}"
+  [ -n "$f" ] && [ -s "$f" ] || return 1
+  jq -er '
+    def passes: ["APPROVE","ACCEPTED","PASS"];
+    def fails:  ["REQUEST_CHANGES","NEEDS_FIXES","FAIL"];
+    if (type == "object")
+       and ((.verdict?  | type) == "string")
+       and ((.findings? | type) == "array")
+       and ((.summary?  | type) == "string")
+    then ((.verdict | ascii_upcase) as $v |
+          if   (passes | index($v)) and (.verdict_class == "pass") and (.gate == "open")
+          then "pass"
+          elif (fails  | index($v)) and (.verdict_class == "fail") and (.gate == "closed")
+          then "fail"
+          else empty end)
+    else empty end' "$f" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Process identity (AC11). A stale record says "pid P, started at tick T, group G". After a crash
+# the kernel may well have handed pid P to somebody else, so (pid, starttime) alone is NOT an
+# identity — it only says "a process with this pid started at this instant". Before we SIGKILL a
+# whole process GROUP we additionally require:
+#   - the live process is still the LEADER of the recorded group (pgid == pid, the `set -m`
+#     invariant), and its real pgid matches what we recorded;
+#   - its argv still carries this run's unique output path. A PID-reuse victim cannot forge that,
+#     and we know the marker by construction (we passed `-o <RUN_DIR>/final.md`), so there is no
+#     launch-time race in capturing it.
+# On failure VERIFY_ERROR explains exactly which check failed, and the caller REFUSES to signal.
+# ---------------------------------------------------------------------------
+verify_leader() {
+  VERIFY_ERROR=""
+  [ -n "${PID:-}" ] && [ "$PID" != "null" ] || { VERIFY_ERROR="no pid recorded"; return 1; }
+  alive "$PID" || { VERIFY_ERROR="pid $PID is not running"; return 1; }
+
+  local cur_start cur_pgid cur_cmd
+  cur_start="$(starttime_of "$PID")"
+  cur_pgid="$(pgid_of "$PID")"
+  cur_cmd="$(cmdline_of "$PID")"
+
+  if [ -z "${START_TICKS:-}" ] || [ "$START_TICKS" = "null" ] || [ "$cur_start" != "$START_TICKS" ]; then
+    VERIFY_ERROR="starttime ${cur_start:-?} != recorded ${START_TICKS:-?} — pid $PID was REUSED by another process"
+    return 1
+  fi
+  if [ -z "${PGID:-}" ] || [ "$PGID" = "null" ] || [ "$cur_pgid" != "$PGID" ]; then
+    VERIFY_ERROR="live pgid ${cur_pgid:-?} != recorded pgid ${PGID:-?}"
+    return 1
+  fi
+  if [ "$PGID" != "$PID" ]; then
+    VERIFY_ERROR="recorded pgid $PGID is not the recorded pid $PID — the process does not lead the group"
+    return 1
+  fi
+  if [ -z "${CMDLINE_MARKER:-}" ]; then
+    VERIFY_ERROR="no cmdline marker on record — this run's identity cannot be proven"
+    return 1
+  fi
+  case "$cur_cmd" in
+    *"$CMDLINE_MARKER"*) : ;;
+    *) VERIFY_ERROR="argv of pid $PID does not carry this run's marker ($CMDLINE_MARKER) — different process"
+       return 1 ;;
+  esac
+  return 0
+}
+
+# Every OTHER member of the group must be a plausible descendant of the verified leader: same
+# group, and started no earlier than the leader (starttime is monotonic since boot, so a process
+# older than the leader cannot descend from it). Anything else means the group is not exclusively
+# ours, and we refuse to SIGKILL it.
+verify_group() {
+  VERIFY_ERROR=""
+  local m st
+  for m in $(group_members "$PGID"); do
+    [ "$m" = "$PID" ] && continue
+    st="$(starttime_of "$m")"
+    if [ -z "$st" ] || [ "$st" -lt "$START_TICKS" ] 2>/dev/null; then
+      VERIFY_ERROR="pid $m in group $PGID predates the leader (starttime ${st:-?} < $START_TICKS) — not our descendant"
+      return 1
+    fi
+  done
+  return 0
+}
+
+# Append-only audit trail for recovery actions. events.jsonl belongs to the CLI and is NEVER
+# rewritten, truncated or appended to by recovery (AC04/AC05) — wrapper-side facts go here.
+recovery_note() {
+  [ -n "${RUN_DIR:-}" ] || return 0
+  printf '%s %s\n' "$(iso)" "$1" >> "$RUN_DIR/recovery.log" 2>/dev/null || true
+  chmod 600 "$RUN_DIR/recovery.log" 2>/dev/null || true
 }
 
 # ---------------------------------------------------------------------------
@@ -118,19 +251,25 @@ group_alive() {
 # ---------------------------------------------------------------------------
 write_status() {
   local tmp="$RUN_DIR/.status.json.$$"
+  # elapsed_sec is FROZEN once the run is over. A finished run whose clock keeps ticking every
+  # time somebody reconciles it is not a record of what happened.
+  local elapsed="${ELAPSED_FROZEN:-}"
+  [ -n "$elapsed" ] || elapsed=$(( $(now) - STARTED ))
   jq -n \
     --arg run_id "$RUN_ID" --arg slug "$SLUG" --arg state "$STATE" \
     --arg started_at "$(iso "$STARTED")" \
     --arg last_event_at "$([ "$LAST_EVENT_TS" -gt 0 ] && iso "$LAST_EVENT_TS" || echo "")" \
     --arg deadline_at "$(iso "$DEADLINE_TS")" \
     --arg message "$MESSAGE" --arg thread_id "$THREAD_ID" \
+    --arg cmdline_marker "${CMDLINE_MARKER:-}" \
     --arg wrapper_version "$WRAPPER_VERSION" \
     --argjson pid "${PID:-null}" --argjson pgid "${PGID:-null}" \
     --argjson start_ticks "${START_TICKS:-null}" \
     --argjson exit_code "${EXIT_CODE:-null}" \
     --argjson progress_confirmed "$PROGRESS_CONFIRMED" \
     --argjson events_seen "$EVENTS_SEEN" --argjson tools_active "$TOOLS_ACTIVE" \
-    --argjson elapsed_sec "$(( $(now) - STARTED ))" \
+    --argjson orphans_left "${ORPHANS_LEFT:-0}" \
+    --argjson elapsed_sec "$elapsed" \
     --arg cli_errors "$CLI_ERRORS" \
     '{run_id:$run_id, slug:$slug, state:$state, pid:$pid, pgid:$pgid,
       start_ticks:$start_ticks, started_at:$started_at,
@@ -138,11 +277,58 @@ write_status() {
       deadline_at:$deadline_at, exit_code:$exit_code,
       progress_confirmed:$progress_confirmed, events_seen:$events_seen,
       tools_active:$tools_active, thread_id:(if $thread_id=="" then null else $thread_id end),
+      cmdline_marker:(if $cmdline_marker=="" then null else $cmdline_marker end),
+      orphans_left:$orphans_left,
       elapsed_sec:$elapsed_sec, message:$message,
       cli_errors:($cli_errors|split("\n")|map(select(.!=""))),
       wrapper_version:$wrapper_version}' > "$tmp" 2>/dev/null \
   && mv -f "$tmp" "$RUN_DIR/status.json"
   rm -f "$tmp" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# Load a run's metadata for reconcile/cleanup WITHOUT destroying it (AC04/AC05).
+# Recovery used to zero last_event_at / tools_active / events_seen / thread_id and to overwrite
+# exit_code with 127 (the shell's "not my child" answer from `wait`) — so the recovered status no
+# longer described the run that actually happened. events.jsonl is append-only evidence: we only
+# ever READ it, and we re-derive the counters from it so recovery makes the record MORE accurate,
+# never less.
+# ---------------------------------------------------------------------------
+load_run_metadata() {
+  local s="$RUN_DIR/status.json"
+  RUN_ID="$(jq -r '.run_id // ""' "$s")"
+  SLUG="$(jq -r '.slug // ""' "$s")"
+  STATE="$(jq -r '.state // "UNKNOWN"' "$s")"
+  PID="$(jq -r '.pid // empty' "$s")"
+  PGID="$(jq -r '.pgid // empty' "$s")"
+  START_TICKS="$(jq -r '.start_ticks // empty' "$s")"
+  CMDLINE_MARKER="$(jq -r '.cmdline_marker // ""' "$s")"
+  THREAD_ID="$(jq -r '.thread_id // ""' "$s")"
+  EXIT_CODE="$(jq -r 'if .exit_code == null then "null" else (.exit_code|tostring) end' "$s")"
+  PROGRESS_CONFIRMED="$(jq -r '.progress_confirmed // false' "$s")"
+  TOOLS_ACTIVE="$(jq -r '.tools_active // 0' "$s")"
+  ORPHANS_LEFT="$(jq -r '.orphans_left // 0' "$s")"
+  CLI_ERRORS="$(jq -r '(.cli_errors // []) | join("\n")' "$s")"
+  MESSAGE="$(jq -r '.message // ""' "$s")"
+  STARTED="$(date -u -d "$(jq -r '.started_at' "$s")" +%s 2>/dev/null || now)"
+  DEADLINE_TS="$(date -u -d "$(jq -r '.deadline_at' "$s")" +%s 2>/dev/null || now)"
+  ELAPSED_FROZEN="$(jq -r '.elapsed_sec // 0' "$s")"
+
+  LAST_EVENT_TS=0
+  local rec_last; rec_last="$(jq -r '.last_event_at // ""' "$s")"
+  [ -n "$rec_last" ] && LAST_EVENT_TS="$(date -u -d "$rec_last" +%s 2>/dev/null || echo 0)"
+
+  EVENTS_SEEN="$(jq -r '.events_seen // 0' "$s")"
+  if [ -s "$RUN_DIR/events.jsonl" ]; then
+    # the raw stream is the authority: a wrapper that died mid-drain under-counted
+    local stream_seen mt
+    stream_seen="$(grep -c . "$RUN_DIR/events.jsonl" 2>/dev/null || echo 0)"
+    [ "$stream_seen" -gt "$EVENTS_SEEN" ] 2>/dev/null && EVENTS_SEEN="$stream_seen"
+    mt="$(stat -c %Y "$RUN_DIR/events.jsonl" 2>/dev/null || echo 0)"
+    [ "$mt" -gt "$LAST_EVENT_TS" ] 2>/dev/null && LAST_EVENT_TS="$mt"
+  fi
+
+  CARRY=""; TURN_FAILED=0; VERDICT_ERROR=""; NO_HEARTBEAT=1
 }
 
 set_state() {
@@ -276,26 +462,44 @@ kill_group() {
   local reason="$1"
   [ -z "${PGID:-}" ] && PGID="$PID"
 
-  kill -TERM "-$PGID" 2>/dev/null || kill -TERM "$PID" 2>/dev/null
+  # Suicide guard: only ever signal a group that is NOT our own. If job control failed to give the
+  # child its own group, group-signalling would kill this wrapper (and its whole session). In that
+  # degraded case we fall back to signalling the single recorded pid.
+  local self_pgid group_ok=1
+  self_pgid="$(pgid_of $$)"
+  if [ -z "$PGID" ] || [ "$PGID" = "null" ] || [ "$PGID" = "$self_pgid" ]; then group_ok=0; fi
 
-  # Escalate on the GROUP, not on the leader. The leader may exit promptly on TERM while a
-  # descendant (a node/codex child that traps or ignores TERM) lingers — waiting only on the
-  # leader would declare success and leave those descendants orphaned.
+  if [ "$group_ok" = "1" ]; then kill -TERM "-$PGID" 2>/dev/null; else kill -TERM "$PID" 2>/dev/null; fi
+
+  # Grace is measured on the GROUP, not on the leader.
   local waited=0
-  while [ "$waited" -lt "$GRACE_SEC" ] && group_alive "$PGID"; do sleep 1; waited=$((waited+1)); done
+  while [ "$waited" -lt "$GRACE_SEC" ]; do
+    if [ "$group_ok" = "1" ]; then group_alive "$PGID" || break; else alive "$PID" || break; fi
+    sleep 1; waited=$((waited+1))
+  done
 
-  if group_alive "$PGID"; then
-    kill -KILL "-$PGID" 2>/dev/null || kill -KILL "$PID" 2>/dev/null
-    local k=0
-    while [ "$k" -lt 5 ] && group_alive "$PGID"; do sleep 1; k=$((k+1)); done
-  fi
+  # UNCONDITIONAL escalation. Do NOT make this depend on the leader (or even the group) still
+  # looking alive: a descendant that inherited SIG_IGN for SIGTERM survives the TERM that kills its
+  # parent, and any liveness probe is a race anyway. SIGKILL on an already-empty group is a no-op
+  # (ESRCH), so there is nothing to lose and an orphan to prevent.
+  if [ "$group_ok" = "1" ]; then kill -KILL "-$PGID" 2>/dev/null; else kill -KILL "$PID" 2>/dev/null; fi
+  sleep 1
 
-  if group_alive "$PGID"; then
-    printf 'codex-review: WARNING — process group %s still has live members after SIGKILL (%s)\n' \
-      "$PGID" "$reason" >&2
-  else
-    printf 'codex-review: terminated process group %s (%s)\n' "$PGID" "$reason" >&2
+  # Verify, don't assume: read the group's membership back out of /proc and report survivors.
+  ORPHANS_LEFT=0
+  if [ "$group_ok" = "1" ]; then
+    local left; left="$(group_members "$PGID" | tr '\n' ' ')"
+    left="${left% }"
+    if [ -n "$left" ]; then
+      ORPHANS_LEFT="$(printf '%s\n' $left | grep -c .)"
+      printf 'codex-review: WARNING — %s process(es) SURVIVED SIGKILL in group %s (%s): %s\n' \
+        "$ORPHANS_LEFT" "$PGID" "$reason" "$left" >&2
+      recovery_note "kill_group: $ORPHANS_LEFT process(es) survived SIGKILL in pgid $PGID ($left)"
+      return 1
+    fi
   fi
+  printf 'codex-review: terminated process group %s (%s)\n' "$PGID" "$reason" >&2
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -304,29 +508,47 @@ kill_group() {
 # ---------------------------------------------------------------------------
 extract_verdict() {
   FINAL_FILE="$RUN_DIR/final.md"
+  # A failed extraction must leave NO usable verdict.json behind — not even a stale one from an
+  # earlier attempt. The gate reads this file; an orphaned pass would reopen it.
+  rm -f "$RUN_DIR/verdict.json" 2>/dev/null
   [ -s "$FINAL_FILE" ] || { VERDICT_ERROR="final.md missing or empty"; return 1; }
 
   RUN_ID="$RUN_ID" PASS_V="$PASS_VERDICTS" FAIL_V="$FAIL_VERDICTS" \
   python3 - "$FINAL_FILE" "$RUN_DIR/verdict.json" <<'PY'
 import json, os, re, sys, datetime
 
+def fail(msg):
+    print(msg, file=sys.stderr)
+    sys.exit(1)
+
 final_path, out_path = sys.argv[1], sys.argv[2]
 text = open(final_path, encoding="utf-8", errors="replace").read()
 PASS = os.environ["PASS_V"].split()
 FAIL = os.environ["FAIL_V"].split()
 
-# Every fenced block, ```lang optional.
-blocks = re.findall(r"^[ \t]*```[^\n`]*\n(.*?)^[ \t]*```", text, re.S | re.M)
-if not blocks:
-    print("no fenced block in final.md", file=sys.stderr); sys.exit(1)
+# Find every FENCE LINE and pair them up, rather than regex-matching complete ```…``` PAIRS.
+# A pair-matching regex is blind to an UNTERMINATED final fence — it simply does not see the block,
+# hands back the previous one, and a model that was killed/rate-limited/context-exhausted mid-answer
+# gets its earlier draft APPROVE promoted to the real verdict. That is the fail-open this whole
+# wrapper exists to prevent, so the fences are counted, not pattern-matched.
+lines = text.split("\n")
+fences = [i for i, ln in enumerate(lines) if re.match(r"^[ \t]*```", ln)]
+if not fences:
+    fail("no fenced block in final.md")
+if len(fences) % 2:
+    # odd number of fence lines => the last one was opened and never closed
+    fail("the final fenced block is UNTERMINATED (truncated response) — not a verdict")
 
-# The LAST fenced block MUST be the verdict. The reviewer contract states that nothing may follow
-# the closing fence, so we do NOT scan backwards for "the most recent block that happens to parse":
-# if the final block is truncated or garbled, falling back to an earlier valid fence would let a
-# broken response through as a clean PASS. A bad last block is a failed review — fail closed.
-chosen = json.loads(blocks[-1])   # JSONDecodeError -> non-zero exit -> FAILED, gate CLOSED
+# The LAST closed fence MUST be the verdict. The reviewer contract says nothing may follow the
+# verdict fence, so we do NOT scan backwards for "the most recent block that happens to parse":
+# a garbled or truncated last block is a FAILED review, never a fallback to an earlier APPROVE.
+block = "\n".join(lines[fences[-2] + 1: fences[-1]])
+try:
+    chosen = json.loads(block)
+except json.JSONDecodeError as e:
+    fail("the last fenced block is not valid JSON (%s) — not a verdict" % e.msg)
 if not isinstance(chosen, dict):
-    print("last fenced block is not a JSON object", file=sys.stderr); sys.exit(1)
+    fail("last fenced block is not a JSON object")
 
 # All three contract fields are MANDATORY — an incomplete verdict object is not a verdict.
 missing = [k for k in ("verdict", "findings", "summary") if k not in chosen]
@@ -372,7 +594,7 @@ PY
 # ---------------------------------------------------------------------------
 cmd_run() {
   local SLUG="review" ROOT="$PWD" MODE="review" BASE="main"
-  local PROMPT_FILE="" PROMPT_TEXT="" PROMPT_STDIN=0
+  local PROMPT_FILE="" PROMPT_STDIN=0
   NO_HEARTBEAT=0
   local -a EXTRA=()
 
@@ -383,8 +605,11 @@ cmd_run() {
       --mode)          MODE="${2:?}"; shift 2 ;;
       --base)          BASE="${2:?}"; shift 2 ;;
       --prompt-file)   PROMPT_FILE="${2:?}"; shift 2 ;;
-      --prompt-text)   PROMPT_TEXT="${2:?}"; shift 2 ;;
       --prompt-stdin)  PROMPT_STDIN=1; shift ;;
+      # REMOVED (AC12). It put the whole review prompt into this process's argv, where every user
+      # on the box can read it out of /proc/<pid>/cmdline. Fail loudly and name the replacement —
+      # a silent "unknown flag" would tempt a caller to shell-quote the prompt somewhere worse.
+      --prompt-text)   die "--prompt-text was REMOVED: a prompt in argv is world-readable via /proc/<pid>/cmdline (AC12). Use --prompt-file <f> or --prompt-stdin." ;;
       --model)         MODEL="${2:?}"; shift 2 ;;
       --effort)        EFFORT="${2:?}"; shift 2 ;;
       --sandbox)       SANDBOX="${2:?}"; shift 2 ;;
@@ -406,18 +631,23 @@ cmd_run() {
   RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)-$$-$(od -An -N2 -tu2 </dev/urandom 2>/dev/null | tr -d ' ' || echo $RANDOM)"
   RUN_DIR="$ROOT/.superflow/reviews/$SLUG/$RUN_ID"
   mkdir -p "$RUN_DIR" || die "cannot create run dir: $RUN_DIR"
+  chmod 700 "$RUN_DIR" 2>/dev/null   # explicit, even though umask 077 already gives us this
+
+  # This run's identity fingerprint (F4/AC11). We hand codex `-o <RUN_DIR>/final.md`, so this exact
+  # string is in the child's argv BY CONSTRUCTION — no launch-time race in capturing it, and a
+  # PID-reuse victim cannot forge it. cleanup/reconcile require it before signalling anything.
+  CMDLINE_MARKER="$RUN_DIR/final.md"
 
   # ---- prompt to a FILE, never argv (AC12) ----
   if [ -n "$PROMPT_FILE" ]; then
     [ -r "$PROMPT_FILE" ] || die "prompt file not readable: $PROMPT_FILE"
     cp "$PROMPT_FILE" "$RUN_DIR/prompt.md"
-  elif [ -n "$PROMPT_TEXT" ]; then
-    printf '%s\n' "$PROMPT_TEXT" > "$RUN_DIR/prompt.md"
   elif [ "$PROMPT_STDIN" = "1" ]; then
     cat > "$RUN_DIR/prompt.md"
   else
-    die "one of --prompt-file / --prompt-text / --prompt-stdin is required"
+    die "one of --prompt-file / --prompt-stdin is required"
   fi
+  chmod 600 "$RUN_DIR/prompt.md" 2>/dev/null
 
   # --- review mode: scope the prompt to <base>...HEAD ---------------------------------
   # codex-cli 0.144.1 REFUSES `exec review --base <BRANCH>` together with a [PROMPT] positional
@@ -597,43 +827,35 @@ finish_report() {
 }
 
 # ---------------------------------------------------------------------------
-# cmd_reconcile — crash recovery (§10 test 9).
-# Reads run metadata from disk and decides the truth WITHOUT trusting a stale
-# "process_alive". A recorded PID that now belongs to a DIFFERENT process (PID reuse)
-# must never be reported as our review still running (AC11).
+# cmd_reconcile — crash recovery (§10 test 9), FAIL-CLOSED.
+#
+# The exit code is the whole point: a review that did not pass must look like a failure to EVERY
+# caller, including one that re-checks the run dir later. reconcile therefore returns exactly what
+# `run` would have returned — 0 only for a re-validated pass-class verdict, 3 for a fail-class one,
+# 1 for everything else (still running, crashed, timed out, no/!valid verdict). It never trusts a
+# stale `state` field on its own, and it never trusts liveness as progress.
+#
+# It is also READ-ONLY with respect to evidence (F5): events.jsonl is append-only and is only ever
+# read; the recorded counters (events_seen / thread_id / last_event_at / progress_confirmed) and the
+# real exit_code survive recovery untouched. Recovery actions go to recovery.log.
 # ---------------------------------------------------------------------------
 cmd_reconcile() {
   RUN_DIR="${1:?usage: codex-review.sh reconcile <run-dir>}"
   [ -s "$RUN_DIR/status.json" ] || die "no status.json in $RUN_DIR"
+  load_run_metadata
 
-  RUN_ID="$(jq -r '.run_id // ""' "$RUN_DIR/status.json")"
-  SLUG="$(jq -r '.slug // ""' "$RUN_DIR/status.json")"
-  STATE="$(jq -r '.state // "UNKNOWN"' "$RUN_DIR/status.json")"
-  PID="$(jq -r '.pid // empty' "$RUN_DIR/status.json")"
-  PGID="$(jq -r '.pgid // empty' "$RUN_DIR/status.json")"
-  START_TICKS="$(jq -r '.start_ticks // empty' "$RUN_DIR/status.json")"
-  STARTED="$(date -u -d "$(jq -r '.started_at' "$RUN_DIR/status.json")" +%s 2>/dev/null || now)"
-  DEADLINE_TS="$(date -u -d "$(jq -r '.deadline_at' "$RUN_DIR/status.json")" +%s 2>/dev/null || now)"
-  LAST_EVENT_TS=0; EVENTS_SEEN="$(jq -r '.events_seen // 0' "$RUN_DIR/status.json")"
-  TOOLS_ACTIVE=0; THREAD_ID="$(jq -r '.thread_id // ""' "$RUN_DIR/status.json")"
-  PROGRESS_CONFIRMED="$(jq -r '.progress_confirmed // false' "$RUN_DIR/status.json")"
-  EXIT_CODE="$(jq -r '.exit_code // "null"' "$RUN_DIR/status.json")"
-  CLI_ERRORS=""; MESSAGE=""; NO_HEARTBEAT=1; VERDICT_ERROR=""
-
-  local ours="no" live="no"
-  if [ -n "$PID" ] && alive "$PID"; then
+  local live="no" ours="no"
+  if [ -n "${PID:-}" ] && [ "$PID" != "null" ] && alive "$PID"; then
     live="yes"
-    local cur; cur="$(starttime_of "$PID")"
-    # identity = (pid, starttime). Same PID with a different starttime = a DIFFERENT process.
-    if [ -n "$START_TICKS" ] && [ "$START_TICKS" != "null" ] && [ "$cur" = "$START_TICKS" ]; then
-      ours="yes"
-    fi
+    # Full identity, not just (pid, starttime): pgid + leadership + this run's argv marker (F4).
+    if verify_leader; then ours="yes"; fi
   fi
 
   printf 'reconcile %s\n  recorded state: %s\n  pid %s live: %s | is-our-process: %s\n' \
     "$RUN_DIR" "$STATE" "${PID:-n/a}" "$live" "$ours"
 
   if [ "$live" = "yes" ] && [ "$ours" = "yes" ]; then
+    # Unsupervised and still breathing. Whatever it is doing, it is NOT a verdict — exit non-zero.
     if [ "$(now)" -ge "$DEADLINE_TS" ]; then
       set_state STALLED_SUSPECTED "reconcile: still running past its deadline; wrapper is gone"
       printf '  -> %s (deadline expired; run `cleanup` to terminate the group)\n' "$STATE"
@@ -642,71 +864,125 @@ cmd_reconcile() {
       set_state SILENT "reconcile: process alive but unsupervised — liveness is not progress"
       printf '  -> %s: %s (progress_confirmed=%s)\n' "$STATE" "$MESSAGE" "$PROGRESS_CONFIRMED"
     fi
+    recovery_note "reconcile: pid $PID alive and verified ours; state -> $STATE (gate CLOSED)"
+    printf '  -> gate CLOSED (an unfinished review is not a pass)\n'
     return 1
   fi
 
   if [ "$live" = "yes" ] && [ "$ours" = "no" ]; then
-    # The recorded PID is now a DIFFERENT process (PID reuse). Keep the pid on record for
-    # forensics — cleanup's own (pid, starttime) guard is what prevents anyone acting on it.
-    printf '  -> PID was REUSED by an unrelated process; not ours, will not be touched.\n'
-    set_state FAILED "reconcile: wrapper died; recorded pid now belongs to a different process (PID reuse)"
-    return 1
+    # The recorded PID is now a DIFFERENT process. Say so loudly, keep the pid on record for
+    # forensics, touch nothing — and go on to judge the run by its ARTIFACTS, which are the only
+    # trustworthy evidence left.
+    printf '  -> pid %s is live but NOT ours: %s\n' "$PID" "$VERIFY_ERROR"
+    printf '  -> treating the recorded PID as REUSED by an unrelated process; it will not be touched.\n'
+    recovery_note "reconcile: recorded pid $PID is not ours ($VERIFY_ERROR); not signalled"
   fi
 
-  # process is gone — decide from artifacts alone
-  if [ "$STATE" = "VERDICT_PARSED" ] && [ -s "$RUN_DIR/verdict.json" ]; then
-    printf '  -> already complete; verdict %s\n' "$(jq -r .verdict "$RUN_DIR/verdict.json")"
+  # ---- the process is gone (or was never ours): judge the run by its artifacts alone ----
+
+  # A stored verdict.json is EVIDENCE, not a certificate: re-validate it against the full contract
+  # instead of believing a `state: VERDICT_PARSED` field. A truncated, hand-edited or half-written
+  # verdict file must not open the gate just because some earlier status said it was fine.
+  local cls=""
+  if [ -e "$RUN_DIR/verdict.json" ]; then
+    cls="$(verdict_class_of "$RUN_DIR/verdict.json")"
+    if [ -z "$cls" ]; then
+      rm -f "$RUN_DIR/verdict.json"
+      recovery_note "reconcile: stored verdict.json failed the contract and was REMOVED (gate CLOSED)"
+      printf '  -> stored verdict.json does NOT satisfy the verdict contract — removed.\n'
+    fi
+  fi
+
+  # Nothing valid on record? Try to re-derive it from final.md — but ONLY for a run that was not
+  # already declared dead. A TIMED_OUT or FAILED run was killed or errored out, so whatever sits in
+  # its final.md is the tail of a review that never finished; promoting that to a verdict is exactly
+  # the fail-open this wrapper exists to prevent. Anything that is not VERDICT_PARSED exits non-zero.
+  if [ -z "$cls" ] && [ -s "$RUN_DIR/final.md" ]; then
+    case "$STATE" in
+      TIMED_OUT|FAILED)
+        printf '  -> recorded state is %s — refusing to mine a verdict out of a review that did not complete.\n' "$STATE"
+        ;;
+      *)
+        if extract_verdict >/dev/null 2>"$RUN_DIR/.verdict.err"; then
+          cls="$(verdict_class_of "$RUN_DIR/verdict.json")"
+          recovery_note "reconcile: recovered verdict from final.md after wrapper crash ($cls)"
+        else
+          VERDICT_ERROR="$(tr -d '\n' < "$RUN_DIR/.verdict.err" 2>/dev/null | cut -c1-300)"
+        fi
+        ;;
+    esac
+  fi
+
+  if [ "$cls" = "pass" ]; then
+    set_state VERDICT_PARSED "reconcile: verdict re-validated: $(jq -r .verdict "$RUN_DIR/verdict.json")"
+    printf '  -> verdict %s (pass-class) — gate OPEN\n' "$(jq -r .verdict "$RUN_DIR/verdict.json")"
     return 0
   fi
-  if [ -s "$RUN_DIR/final.md" ] && extract_verdict >/dev/null 2>&1; then
-    set_state VERDICT_PARSED "reconcile: recovered verdict from final.md after wrapper crash"
-    printf '  -> recovered verdict %s\n' "$(jq -r .verdict "$RUN_DIR/verdict.json")"
-    [ "$(jq -r .verdict_class "$RUN_DIR/verdict.json")" = "pass" ] && return 0 || return 3
+  if [ "$cls" = "fail" ]; then
+    # THE critical case (F1): a stored REQUEST_CHANGES/NEEDS_FIXES/FAIL used to reconcile to 0,
+    # which silently turned a rejected review into a green gate on every re-check.
+    set_state VERDICT_PARSED "reconcile: verdict re-validated: $(jq -r .verdict "$RUN_DIR/verdict.json")"
+    printf '  -> verdict %s (fail-class) — gate CLOSED\n' "$(jq -r .verdict "$RUN_DIR/verdict.json")"
+    return 3
   fi
-  set_state FAILED "reconcile: process gone, no valid verdict — review did not complete"
+
+  set_state FAILED "reconcile: no valid verdict — review did not complete${VERDICT_ERROR:+: $VERDICT_ERROR}"
+  recovery_note "reconcile: no valid verdict (gate CLOSED)${VERDICT_ERROR:+ — $VERDICT_ERROR}"
   printf '  -> FAILED (no valid verdict; gate CLOSED)\n'
   return 1
 }
 
 # ---------------------------------------------------------------------------
-# cmd_cleanup — verified stale-process termination (§8, AC11).
-# Refuses to kill unless (pid, starttime) still matches the run metadata.
+# cmd_cleanup — verified stale-process termination (§8, AC11, F4).
+#
+# This function SIGKILLs an entire process group, so the bar for proving that the group is ours is
+# absolute. (pid, starttime) is NOT enough: it only says "a process with this pid started at this
+# instant" — it says nothing about the group we are about to wipe out. Before signalling we require
+# ALL of:
+#   - pid alive, and its starttime equals the recorded one          (not a reused pid)
+#   - its real pgid equals the recorded pgid, and it LEADS that group (the `set -m` invariant)
+#   - its argv still carries this run's unique output path           (not a lookalike)
+#   - every other member of the group started no earlier than the leader (a genuine descendant)
+# Any doubt at all -> REFUSE and exit 1. The handoff is explicit: a diagnostic snapshot is not a
+# licence to kill a PID.
 # ---------------------------------------------------------------------------
 cmd_cleanup() {
   RUN_DIR="${1:?usage: codex-review.sh cleanup <run-dir> [--force]}"; shift || true
   local FORCE=0; [ "${1:-}" = "--force" ] && FORCE=1
   [ -s "$RUN_DIR/status.json" ] || die "no status.json in $RUN_DIR"
+  load_run_metadata     # evidence-preserving: keeps events_seen / thread_id / exit_code (F5)
 
-  RUN_ID="$(jq -r '.run_id // ""' "$RUN_DIR/status.json")"
-  SLUG="$(jq -r '.slug // ""' "$RUN_DIR/status.json")"
-  STATE="$(jq -r '.state // "UNKNOWN"' "$RUN_DIR/status.json")"
-  PID="$(jq -r '.pid // empty' "$RUN_DIR/status.json")"
-  PGID="$(jq -r '.pgid // empty' "$RUN_DIR/status.json")"
-  START_TICKS="$(jq -r '.start_ticks // empty' "$RUN_DIR/status.json")"
-  STARTED="$(date -u -d "$(jq -r '.started_at' "$RUN_DIR/status.json")" +%s 2>/dev/null || now)"
-  DEADLINE_TS="$(date -u -d "$(jq -r '.deadline_at' "$RUN_DIR/status.json")" +%s 2>/dev/null || now)"
-  LAST_EVENT_TS=0; EVENTS_SEEN=0; TOOLS_ACTIVE=0; THREAD_ID=""
-  PROGRESS_CONFIRMED=false; EXIT_CODE=null; CLI_ERRORS=""; MESSAGE=""; NO_HEARTBEAT=1
-
-  if [ -z "$PID" ] || ! alive "$PID"; then
+  if [ -z "${PID:-}" ] || [ "$PID" = "null" ] || ! alive "$PID"; then
     printf 'cleanup: pid %s not running — nothing to kill.\n' "${PID:-n/a}"; return 0
   fi
-  local cur; cur="$(starttime_of "$PID")"
-  if [ -z "$START_TICKS" ] || [ "$START_TICKS" = "null" ] || [ "$cur" != "$START_TICKS" ]; then
-    printf 'cleanup: REFUSING to kill pid %s — starttime %s != recorded %s (PID reuse; not our process).\n' \
-      "$PID" "${cur:-?}" "${START_TICKS:-?}" >&2
+
+  if ! verify_leader; then
+    printf 'cleanup: REFUSING to signal pid %s / pgid %s — %s\n' "$PID" "${PGID:-?}" "$VERIFY_ERROR" >&2
+    recovery_note "cleanup: REFUSED to signal pid $PID — $VERIFY_ERROR"
+    return 1
+  fi
+  if ! verify_group; then
+    printf 'cleanup: REFUSING to signal process group %s — %s\n' "$PGID" "$VERIFY_ERROR" >&2
+    recovery_note "cleanup: REFUSED to signal pgid $PGID — $VERIFY_ERROR"
     return 1
   fi
   if [ "$FORCE" != "1" ] && [ "$(now)" -lt "$DEADLINE_TS" ]; then
     printf 'cleanup: pid %s is our process but its deadline has not expired. Use --force to override.\n' "$PID" >&2
     return 1
   fi
+
+  recovery_note "cleanup: verified pid $PID / pgid $PGID as this run's group; terminating (force=$FORCE)"
   kill_group "cleanup of stale run $RUN_ID"
-  wait "$PID" 2>/dev/null
-  EXIT_CODE=$?
+  local krc=$?
+
+  # Deliberately NO `wait` here: this process is NOT our child (the wrapper that forked it is gone),
+  # so `wait` would return 127 — "no such job" — and recording that as the review's exit code would
+  # invent a CLI failure that never happened and overwrite real evidence (F5). The exit code loaded
+  # from status.json stands as it is.
   set_state FAILED "cleanup: stale process group terminated by operator"
   printf 'cleanup: terminated pid %s / pgid %s (run %s).\n' "$PID" "$PGID" "$RUN_ID"
-  return 0
+  [ "$krc" -ne 0 ] && printf 'cleanup: WARNING — %s process(es) survived; see recovery.log\n' "$ORPHANS_LEFT" >&2
+  return "$krc"
 }
 
 # ---------------------------------------------------------------------------

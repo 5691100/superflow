@@ -5,12 +5,20 @@
 # Covers the 9 mandatory tests from the transparent-Codex-review-wrapper handoff (§10):
 #   1 normal  2 silent  3 timeout  4 malformed verdict  5 concurrent
 #   6 no-wrong-PID  7 early CLI failure  8 tool activity  9 crash/recovery
+# …plus the regression suite for the Codex review r1 findings, which were all fail-OPEN defects
+# that the happy-path tests could not see:
+#   10 reconcile is fail-closed on a stored fail-class verdict            (F1, critical)
+#   11 the prompt never reaches argv; artifacts are 0700/0600             (F6)
+#   12 cleanup verifies the GROUP's identity before signalling it         (F4)
+#   13 recovery preserves the event stream and the recorded evidence      (F5)
+#   14 the rollback flag (CODEX_REVIEW_WRAPPER_V2=0) is still fail-closed (AC14)
 #
 # Hermetic: never invokes the real `codex` CLI or the network. All runs use
 # tools/test-fixtures/fake-codex.sh, which replays the real 0.144.1 JSONL grammar.
 #
 # Discipline: tests run SEQUENTIALLY (one test process at a time) and every wrapper
-# invocation is wrapped in `timeout`.
+# invocation is wrapped in `timeout`. THIS FILE lives by the same banned-pattern rules as the
+# wrapper (no pgrep, no `tail --pid`, no `| tail -N`) — T6 scans it to prove it.
 #
 # Usage: bash tools/test-codex-review.sh [test-number ...]
 # Exit 0 = all pass, 1 = any failure.
@@ -18,6 +26,7 @@
 set -uo pipefail
 
 HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SELF="${BASH_SOURCE[0]}"
 WRAPPER="$HERE/codex-review.sh"
 FAKE="$HERE/test-fixtures/fake-codex.sh"
 
@@ -43,12 +52,35 @@ assert_contains() {
 assert_file() {
   if [ -s "$1" ]; then ok "$2"; else bad "$2 — missing/empty: $1"; fi
 }
-# state <run-dir>
+assert_absent() {  # <path> <label>
+  if [ -e "$1" ]; then bad "$2 — $1 still exists"; else ok "$2"; fi
+}
 state()  { jq -r '.state'   "$1/status.json" 2>/dev/null; }
 jqf()    { jq -r "$2" "$1" 2>/dev/null; }
+md5()    { md5sum "$1" 2>/dev/null | cut -d' ' -f1; }
 
-# newest run dir under <root>/.superflow/reviews/<slug>
-rundir() { find "$1/.superflow/reviews/$2" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort | tail -1; }
+# newest run dir under <root>/.superflow/reviews/<slug>. Glob order is chronological because a
+# RUN_ID starts with a UTC timestamp. (No `| tail -1`: the banned-pattern scanner covers this file.)
+rundir() {
+  local d last=""
+  for d in "$1/.superflow/reviews/$2"/*/; do [ -d "$d" ] && last="${d%/}"; done
+  printf '%s\n' "$last"
+}
+
+# Write <text> to <dir>/prompt.in, echo the path. The tests NEVER pass prompt content in argv:
+# --prompt-text is gone (F6/AC12) because a review prompt can carry unreleased code and security
+# findings, and argv is world-readable through /proc/<pid>/cmdline.
+pfile() {
+  local d="$1"; mkdir -p "$d"
+  printf '%s\n' "$2" > "$d/prompt.in"
+  printf '%s\n' "$d/prompt.in"
+}
+
+# Live (non-zombie) members of a process GROUP — by numeric pgid, never by name pattern.
+group_count() { ps -eo pgid=,stat= 2>/dev/null | awk -v g="$1" '$1==g && $2 !~ /^Z/ {n++} END{print n+0}'; }
+
+# The command line of ONE process, looked up BY PID (the sanctioned lookup — see T6).
+cmdline_of() { tr '\0' ' ' < "/proc/$1/cmdline" 2>/dev/null; }
 
 want() { # want <n> — should this test run?
   [ ${#SELECT[@]} -eq 0 ] && return 0
@@ -64,10 +96,11 @@ t1() {
   head_ T1 "normal review reaches VERDICT_PARSED"
   local root="$TMPROOT/t1"; mkdir -p "$root"
   local out="$root/stdout.txt"
+  local sentinel="review this diff"
 
   CODEX_BIN="$FAKE" FAKE_MODE=normal FAKE_ARGV_OUT="$root/argv.txt" \
-  timeout 60 bash "$WRAPPER" run --slug s1 --root "$root" --base main --prompt-text "review this diff" \
-    --heartbeat-sec 1 >"$out" 2>&1
+  timeout 60 bash "$WRAPPER" run --slug s1 --root "$root" --base main \
+    --prompt-file "$(pfile "$root/p" "$sentinel")" --heartbeat-sec 1 >"$out" 2>&1
   local rc=$?
 
   local rd; rd="$(rundir "$root" s1)"
@@ -81,7 +114,7 @@ t1() {
     ok "T1 argv avoids the illegal 'review --base' + prompt combination"
   fi
   assert_contains "$root/argv.txt" "-o " "T1 prompt is NOT in argv — passed via stdin (AC12)"
-  if grep -qF "review this diff" "$root/argv.txt"; then bad "T1 prompt LEAKED into argv"; else ok "T1 prompt text never appears in argv (AC12)"; fi
+  if grep -qF "$sentinel" "$root/argv.txt"; then bad "T1 prompt LEAKED into argv"; else ok "T1 prompt text never appears in argv (AC12)"; fi
   assert_contains "$rd/prompt.md" "git diff main...HEAD" "T1 review mode scopes the prompt to <base>...HEAD"
   assert_eq 0 "$rc" "T1 exit 0 (valid pass-class verdict)"
   assert_eq "VERDICT_PARSED" "$(state "$rd")" "T1 terminal state"
@@ -97,13 +130,12 @@ t1() {
   assert_eq "open"    "$(jqf "$rd/verdict.json" .gate)" "T1 gate open"
   assert_eq "true"    "$(jqf "$rd/status.json" .progress_confirmed)" "T1 progress_confirmed"
   assert_eq "0"       "$(jqf "$rd/status.json" .exit_code)" "T1 exit_code recorded"
+  # the run's identity fingerprint, used by cleanup to prove a live group is really ours (F4)
+  assert_eq "$rd/final.md" "$(jqf "$rd/status.json" .cmdline_marker)" "T1 cmdline_marker recorded"
   assert_contains "$out" "Codex review:" "T1 heartbeat printed to stdout"
   # AC01: raw event stream is visible, not swallowed by tail -N
   assert_contains "$rd/events.jsonl" '"type":"thread.started"' "T1 raw JSONL stream preserved (AC01)"
 }
-
-# count live processes in a process GROUP (numeric pgid — not a name pattern)
-group_count() { ps -eo pgid=,stat= 2>/dev/null | awk -v g="$1" '$1==g && $2 !~ /^Z/ {n++} END{print n+0}'; }
 
 # ---------------------------------------------------------------------------
 # T2 — silent: alive but emitting nothing. Must surface SILENT then STALLED_SUSPECTED,
@@ -115,7 +147,7 @@ t2() {
   local out="$root/stdout.txt"
 
   CODEX_BIN="$FAKE" FAKE_MODE=silent FAKE_SILENT_SEC=60 \
-  timeout 40 bash "$WRAPPER" run --slug s2 --root "$root" --prompt-text "p" \
+  timeout 40 bash "$WRAPPER" run --slug s2 --root "$root" --prompt-file "$(pfile "$root/p" "p")" \
     --heartbeat-sec 1 --silent-sec 2 --stall-sec 5 --deadline-sec 9 >"$out" 2>&1
   local rc=$?
 
@@ -123,61 +155,75 @@ t2() {
   assert_contains "$out" "Codex review: SILENT"            "T2 SILENT state surfaced"
   assert_contains "$out" "Codex review: STALLED_SUSPECTED" "T2 STALLED_SUSPECTED surfaced"
   assert_contains "$out" "progress confirmed no"           "T2 heartbeat says progress NOT confirmed"
+  # A live process that never speaks is the exact shape of the 26-day hang: the heartbeat must
+  # say "alive" and "progress NOT confirmed" in the same breath, and must never claim otherwise.
+  assert_contains "$out" "alive yes"                       "T2 heartbeat reports liveness separately from progress"
   assert_eq "false" "$(jqf "$rd/status.json" .progress_confirmed)" "T2 progress_confirmed=false"
   assert_eq "0"     "$(jqf "$rd/status.json" .events_seen)"        "T2 zero events seen"
+  assert_eq "TIMED_OUT" "$(state "$rd")" "T2 terminal state (deadline, not a verdict)"
+  if grep -q "VERDICT_PARSED" "$out"; then bad "T2 a silent run must never reach VERDICT_PARSED"; else ok "T2 never reaches VERDICT_PARSED"; fi
+  assert_absent "$rd/verdict.json" "T2 no verdict.json from a silent run"
   assert_eq 1 "$rc" "T2 exit 1 (no verdict — gate closed)"
 }
 
 # ---------------------------------------------------------------------------
-# T3 — timeout: hard deadline kills the WHOLE process group, no orphans. (AC08)
+# T3 — timeout: hard deadline kills the WHOLE process group, no orphans. (AC08, F3)
 # ---------------------------------------------------------------------------
 t3() {
-  head_ T3 "hard deadline -> TIMED_OUT, whole group reaped, partial logs kept"
+  head_ T3 "hard deadline -> TIMED_OUT, whole group reaped incl. a TERM-resistant descendant"
   local root="$TMPROOT/t3"; mkdir -p "$root"
   local out="$root/stdout.txt"
 
-  CODEX_BIN="$FAKE" FAKE_MODE=hang FAKE_HANG_SEC=300 \
-  timeout 40 bash "$WRAPPER" run --slug s3 --root "$root" --prompt-text "p" \
+  CODEX_BIN="$FAKE" FAKE_MODE=hang FAKE_HANG_SEC=300 FAKE_GRANDCHILD_OUT="$root/gc.pid" \
+  timeout 40 bash "$WRAPPER" run --slug s3 --root "$root" --prompt-file "$(pfile "$root/p" "p")" \
     --heartbeat-sec 1 --silent-sec 30 --stall-sec 60 --deadline-sec 3 --grace-sec 2 >"$out" 2>&1
   local rc=$?
 
   local rd; rd="$(rundir "$root" s3)"
-  local pid pgid
+  local pid pgid gc
   pid="$(jqf "$rd/status.json" .pid)"; pgid="$(jqf "$rd/status.json" .pgid)"
+  gc="$(cat "$root/gc.pid" 2>/dev/null)"
 
   assert_eq "TIMED_OUT" "$(state "$rd")" "T3 state"
   assert_eq 1 "$rc" "T3 exit 1 (timed out — gate closed)"
-  # the fixture spawned a grandchild in the same group; both must be gone
   sleep 1
+  # The grandchild IGNORES SIGTERM. Escalating only while the LEADER is alive would skip the
+  # SIGKILL and leave it running forever — the orphan class this wrapper exists to prevent.
+  if [ -n "$gc" ] && kill -0 "$gc" 2>/dev/null; then
+    bad "T3 TERM-resistant descendant ($gc) SURVIVED — the group was not SIGKILLed"
+  else
+    ok "T3 TERM-resistant descendant was SIGKILLed with the group"
+  fi
   assert_eq "0" "$(group_count "$pgid")" "T3 no orphans left in process group $pgid"
   if kill -0 "$pid" 2>/dev/null; then bad "T3 child still alive"; else ok "T3 child reaped"; fi
+  assert_eq "0" "$(jqf "$rd/status.json" .orphans_left)" "T3 wrapper verified the group is empty"
   # partial evidence preserved
   assert_contains "$rd/events.jsonl" '"type":"turn.started"' "T3 partial events preserved"
   assert_file "$rd/status.json" "T3 status.json preserved"
-  assert_eq "null" "$(jqf "$rd/verdict.json" .verdict 2>/dev/null || echo null)" "T3 no verdict on timeout"
+  assert_absent "$rd/verdict.json" "T3 no verdict on timeout"
 }
 
 # ---------------------------------------------------------------------------
-# T4 — malformed / unknown / prose-only verdict: gate stays CLOSED. (AC09)
+# T4 — malformed / unknown / prose-only / truncated verdict: gate stays CLOSED. (AC09, F2)
 # ---------------------------------------------------------------------------
 t4() {
-  head_ T4 "malformed, unknown and prose-only verdicts all fail the gate"
+  head_ T4 "every non-conforming final message fails the gate — no fallback to an earlier fence"
   local root="$TMPROOT/t4"; mkdir -p "$root"; local rd rc
 
   # (a) corrupt JSON inside the fence
   CODEX_BIN="$FAKE" FAKE_MODE=malformed \
-    timeout 40 bash "$WRAPPER" run --slug m1 --root "$root" --prompt-text "p" \
+    timeout 40 bash "$WRAPPER" run --slug m1 --root "$root" --prompt-file "$(pfile "$root/p" "p")" \
       --no-heartbeat >"$root/a.txt" 2>&1
   rc=$?; rd="$(rundir "$root" m1)"
   assert_eq 1 "$rc" "T4a malformed JSON -> exit 1"
   assert_eq "FAILED" "$(state "$rd")" "T4a state FAILED"
   assert_file "$rd/final.md" "T4a final.md preserved for diagnosis"
-  if [ -f "$rd/verdict.json" ]; then bad "T4a verdict.json must NOT exist"; else ok "T4a no verdict.json"; fi
+  assert_absent "$rd/verdict.json" "T4a no verdict.json"
   assert_contains "$root/a.txt" "gate:       CLOSED" "T4a gate reported CLOSED"
 
   # (b) parseable JSON, unknown verdict value
   CODEX_BIN="$FAKE" FAKE_MODE=badverdict \
-    timeout 40 bash "$WRAPPER" run --slug m2 --root "$root" --prompt-text "p" \
+    timeout 40 bash "$WRAPPER" run --slug m2 --root "$root" --prompt-file "$(pfile "$root/p" "p")" \
       --no-heartbeat >"$root/b.txt" 2>&1
   rc=$?; rd="$(rundir "$root" m2)"
   assert_eq 1 "$rc" "T4b unknown verdict 'LGTM' -> exit 1"
@@ -185,32 +231,44 @@ t4() {
 
   # (c) prose only, and the prose literally says "APPROVE" — must NOT become a pass
   CODEX_BIN="$FAKE" FAKE_MODE=noverdict \
-    timeout 40 bash "$WRAPPER" run --slug m3 --root "$root" --prompt-text "p" \
+    timeout 40 bash "$WRAPPER" run --slug m3 --root "$root" --prompt-file "$(pfile "$root/p" "p")" \
       --no-heartbeat >"$root/c.txt" 2>&1
   rc=$?; rd="$(rundir "$root" m3)"
   assert_eq 1 "$rc" "T4c prose saying APPROVE -> exit 1 (prose is never parsed)"
-  if [ -f "$rd/verdict.json" ]; then bad "T4c verdict.json must NOT exist"; else ok "T4c no false PASS from prose"; fi
+  assert_absent "$rd/verdict.json" "T4c no false PASS from prose"
 
-  # (d) valid verdict fence followed by a LATER corrupt fence. Falling back to the earlier valid
-  #     block would let a truncated/garbled response pass as a clean APPROVE. (Codex finding #2)
+  # (d) valid APPROVE fence followed by a LATER corrupt fence. Scanning backwards for "the last
+  #     block that happens to parse" would return the APPROVE and open the gate. (F2)
   CODEX_BIN="$FAKE" FAKE_MODE=trailingbad \
-    timeout 40 bash "$WRAPPER" run --slug m4 --root "$root" --prompt-text "p" \
+    timeout 40 bash "$WRAPPER" run --slug m4 --root "$root" --prompt-file "$(pfile "$root/p" "p")" \
       --no-heartbeat >"$root/d.txt" 2>&1
   rc=$?; rd="$(rundir "$root" m4)"
   assert_eq 1 "$rc" "T4d corrupt LAST fence -> exit 1 (no fallback to an earlier valid fence)"
-  if [ -f "$rd/verdict.json" ]; then bad "T4d must NOT accept the earlier APPROVE fence"; else ok "T4d no verdict.json (fail-closed)"; fi
+  assert_absent "$rd/verdict.json" "T4d the earlier APPROVE fence is NOT used"
 
   # (e) verdict present but `findings`/`summary` missing — the contract requires all three.
   CODEX_BIN="$FAKE" FAKE_MODE=partial \
-    timeout 40 bash "$WRAPPER" run --slug m5 --root "$root" --prompt-text "p" \
+    timeout 40 bash "$WRAPPER" run --slug m5 --root "$root" --prompt-file "$(pfile "$root/p" "p")" \
       --no-heartbeat >"$root/e.txt" 2>&1
   rc=$?; rd="$(rundir "$root" m5)"
   assert_eq 1 "$rc" "T4e incomplete verdict object -> exit 1 (findings+summary are mandatory)"
-  if [ -f "$rd/verdict.json" ]; then bad "T4e must NOT accept a verdict missing findings/summary"; else ok "T4e no verdict.json (fail-closed)"; fi
+  assert_absent "$rd/verdict.json" "T4e no verdict.json for an incomplete schema"
+
+  # (f) valid APPROVE fence followed by a TRUNCATED one (opened, never closed) — a killed or
+  #     rate-limited model. A closed-fence-only regex cannot SEE the truncated block, so it
+  #     silently returns the earlier APPROVE: the same fail-open, one step subtler. (F2 residual)
+  CODEX_BIN="$FAKE" FAKE_MODE=truncated \
+    timeout 40 bash "$WRAPPER" run --slug m6 --root "$root" --prompt-file "$(pfile "$root/p" "p")" \
+      --no-heartbeat >"$root/f.txt" 2>&1
+  rc=$?; rd="$(rundir "$root" m6)"
+  assert_eq 1 "$rc" "T4f UNTERMINATED last fence -> exit 1 (a truncated answer is not a verdict)"
+  assert_eq "FAILED" "$(state "$rd")" "T4f state FAILED"
+  assert_absent "$rd/verdict.json" "T4f the earlier APPROVE fence is NOT used for a truncated tail"
 }
 
 # ---------------------------------------------------------------------------
-# T5 — concurrent reviews: separate dirs / pids / pgids, results never cross. (AC03, AC10)
+# T5 — concurrent reviews: separate dirs / pids / pgids, results never cross, and a concurrent
+#      reader never sees a torn status.json. (AC03, AC04, AC10)
 # ---------------------------------------------------------------------------
 t5() {
   head_ T5 "two concurrent reviews on the same slug do not collide"
@@ -218,7 +276,7 @@ t5() {
 
   local rcA rcB
   ( CODEX_BIN="$FAKE" FAKE_MODE=normal FAKE_TOOL_SEC=2 \
-      timeout 40 bash "$WRAPPER" run --slug same --root "$root" --prompt-text "A" \
+      timeout 40 bash "$WRAPPER" run --slug same --root "$root" --prompt-file "$(pfile "$root/pa" "A")" \
         --no-heartbeat >"$root/A.txt" 2>&1; echo $? >"$root/rcA" ) &
   local pA=$!
   ( CODEX_BIN="$FAKE" FAKE_MODE=normal FAKE_TOOL_SEC=2 \
@@ -227,11 +285,27 @@ t5() {
 ```json
 {"verdict":"REQUEST_CHANGES","findings":[{"id":"F1"}],"summary":"B findings"}
 ```' \
-      timeout 40 bash "$WRAPPER" run --slug same --root "$root" --prompt-text "B" \
+      timeout 40 bash "$WRAPPER" run --slug same --root "$root" --prompt-file "$(pfile "$root/pb" "B")" \
         --no-heartbeat >"$root/B.txt" 2>&1; echo $? >"$root/rcB" ) &
   local pB=$!
+
+  # AC04: status.json is replaced by an atomic tmp+rename. Hammer both files while the runs are in
+  # flight — every single read must parse. A torn read is what makes an orchestrator act on a
+  # half-written state.
+  local torn=0 reads=0 f stop=$(( $(date +%s) + 6 ))
+  while [ "$(date +%s)" -lt "$stop" ]; do
+    for f in "$root"/.superflow/reviews/same/*/status.json; do
+      [ -f "$f" ] || continue
+      reads=$((reads+1))
+      jq -e . "$f" >/dev/null 2>&1 || torn=$((torn+1))
+    done
+  done
   wait "$pA" "$pB"
   rcA="$(cat "$root/rcA")"; rcB="$(cat "$root/rcB")"
+
+  if [ "$reads" -gt 100 ]; then ok "T5 status.json was sampled $reads times under concurrency"
+  else bad "T5 too few concurrent reads ($reads) — the torn-read check would be vacuous"; fi
+  assert_eq 0 "$torn" "T5 zero torn/partial status.json reads (atomic rename)"
 
   local dirs; dirs="$(find "$root/.superflow/reviews/same" -mindepth 1 -maxdepth 1 -type d | wc -l)"
   assert_eq 2 "$dirs" "T5 two distinct run directories"
@@ -258,43 +332,53 @@ t5() {
 
 # ---------------------------------------------------------------------------
 # T6 — no wrong PID: a decoy whose cmdline looks exactly like a codex review must be
-#      untouched, even when the wrapper TERMs its own process group. (AC02, AC11)
+#      untouched, even when the wrapper TERMs its own process group. (AC02, AC11, F7)
 # ---------------------------------------------------------------------------
 t6() {
   head_ T6 "decoy 'codex exec' process is never matched, waited on, or killed"
   local root="$TMPROOT/t6"; mkdir -p "$root"
 
-  # decoy: argv[0] is literally a codex review command line -> `pgrep -f "codex exec"` WOULD match it
+  # decoy: argv[0] IS a codex review command line -> the old `pgrep -f "codex exec"` would match it
   bash -c 'exec -a "codex exec review --base main -m gpt-5.6-sol -c model_reasoning_effort=high" sleep 60' &
   local decoy=$!
   sleep 0.5
 
-  if pgrep -f "codex exec review" >/dev/null 2>&1; then
-    ok "T6 decoy is matchable by the OLD pgrep pattern (so the trap is real)"
-  else
-    bad "T6 decoy did not register — test would be vacuous"
-  fi
+  # Prove the trap is real WITHOUT searching for a process by name: read the decoy's own cmdline
+  # BY PID — the only sanctioned lookup — and confirm it carries the string the old recovery
+  # pattern would have matched. (The test suite must not use pgrep either. F7.)
+  case "$(cmdline_of "$decoy")" in
+    *"codex exec review"*) ok "T6 decoy's cmdline is what the old pattern-matching recovery would have grabbed" ;;
+    *)                     bad "T6 decoy did not register — test would be vacuous" ;;
+  esac
 
-  # a hanging run that will hit its deadline and TERM its own group
+  # a hanging run that will hit its deadline and TERM/KILL its own group
   CODEX_BIN="$FAKE" FAKE_MODE=hang FAKE_HANG_SEC=120 \
-  timeout 40 bash "$WRAPPER" run --slug s6 --root "$root" --prompt-text "p" \
+  timeout 40 bash "$WRAPPER" run --slug s6 --root "$root" --prompt-file "$(pfile "$root/p" "p")" \
     --no-heartbeat --deadline-sec 3 --grace-sec 2 >"$root/out.txt" 2>&1
   local rd; rd="$(rundir "$root" s6)"
-  local pid; pid="$(jqf "$rd/status.json" .pid)"
+  local pid pgid; pid="$(jqf "$rd/status.json" .pid)"; pgid="$(jqf "$rd/status.json" .pgid)"
 
   if [ "$pid" != "$decoy" ]; then ok "T6 wrapper tracked its own child ($pid), not the decoy ($decoy)"
   else bad "T6 wrapper latched onto the decoy PID"; fi
+  # the decoy must not even share the group we SIGKILLed
+  local dpgid; dpgid="$(ps -o pgid= -p "$decoy" 2>/dev/null | tr -d ' ')"
+  if [ "$dpgid" != "$pgid" ]; then ok "T6 decoy is not in the run's process group"; else bad "T6 decoy shares the killed group"; fi
   sleep 1
   if kill -0 "$decoy" 2>/dev/null; then ok "T6 decoy SURVIVED the group kill"; else bad "T6 decoy was killed"; fi
 
   kill -KILL "$decoy" 2>/dev/null; wait "$decoy" 2>/dev/null
 
-  # Static guarantee: the banned patterns appear nowhere in EXECUTABLE code.
-  # `^[^#]*` anchors the match before the first '#', so the header comments that *name*
-  # these patterns (in order to explain why they are forbidden) do not trip the check.
-  if grep -qE '^[^#]*\bpgrep\b' "$WRAPPER"; then bad "T6 wrapper CODE contains pgrep"; else ok "T6 wrapper code contains no pgrep (AC02)"; fi
-  if grep -qE '^[^#]*tail[[:space:]]+--pid' "$WRAPPER"; then bad "T6 wrapper CODE contains 'tail --pid'"; else ok "T6 wrapper code has no 'tail --pid'"; fi
-  if grep -qE '^[^#]*\|[[:space:]]*tail[[:space:]]+-' "$WRAPPER"; then bad "T6 wrapper CODE pipes into tail -N"; else ok "T6 wrapper code never pipes into 'tail -N' (AC01)"; fi
+  # Static guarantee: the banned patterns appear nowhere in EXECUTABLE code — in the wrapper OR in
+  # this test file. (r1 finding F7: the suite itself was calling pgrep while asserting nobody does.)
+  # `^[^#]*` anchors the match before the first '#', so comments that NAME these patterns in order
+  # to explain why they are forbidden do not trip the check.
+  local f n
+  for f in "$WRAPPER" "$SELF"; do
+    n="$(basename "$f")"
+    if grep -qE '^[^#]*\bpgrep\b' "$f"; then bad "T6 $n CODE contains pgrep"; else ok "T6 $n code contains no pgrep (AC02)"; fi
+    if grep -qE '^[^#]*tail[[:space:]]+--pid' "$f"; then bad "T6 $n CODE contains 'tail --pid'"; else ok "T6 $n code has no 'tail --pid'"; fi
+    if grep -qE '^[^#]*\|[[:space:]]*tail[[:space:]]+-' "$f"; then bad "T6 $n CODE pipes into tail -N"; else ok "T6 $n code never pipes into 'tail -N' (AC01)"; fi
+  done
 }
 
 # ---------------------------------------------------------------------------
@@ -305,7 +389,7 @@ t7() {
   local root="$TMPROOT/t7"; mkdir -p "$root"
 
   CODEX_BIN="$FAKE" FAKE_MODE=failfast \
-  timeout 40 bash "$WRAPPER" run --slug s7 --root "$root" --prompt-text "p" \
+  timeout 40 bash "$WRAPPER" run --slug s7 --root "$root" --prompt-file "$(pfile "$root/p" "p")" \
     --no-heartbeat >"$root/out.txt" 2>&1
   local rc=$?
   local rd; rd="$(rundir "$root" s7)"
@@ -315,7 +399,7 @@ t7() {
   assert_eq "2" "$(jqf "$rd/status.json" .exit_code)" "T7 CLI exit code recorded"
   assert_file "$rd/stderr.log" "T7 stderr.log preserved"
   assert_contains "$rd/stderr.log" "not available" "T7 CLI error text captured"
-  if [ -f "$rd/verdict.json" ]; then bad "T7 verdict.json must NOT exist"; else ok "T7 no verdict on failure"; fi
+  assert_absent "$rd/verdict.json" "T7 no verdict on failure"
 }
 
 # ---------------------------------------------------------------------------
@@ -327,7 +411,7 @@ t8() {
   local out="$root/stdout.txt"
 
   CODEX_BIN="$FAKE" FAKE_MODE=tools FAKE_TOOL_SEC=3 \
-  timeout 40 bash "$WRAPPER" run --slug s8 --root "$root" --prompt-text "p" \
+  timeout 40 bash "$WRAPPER" run --slug s8 --root "$root" --prompt-file "$(pfile "$root/p" "p")" \
     --heartbeat-sec 1 --deadline-sec 25 >"$out" 2>&1
   local rc=$?
   local rd; rd="$(rundir "$root" s8)"
@@ -351,7 +435,7 @@ t9() {
 
   # start a run, then hard-kill the WRAPPER (child keeps running, orphaned)
   CODEX_BIN="$FAKE" FAKE_MODE=hang FAKE_HANG_SEC=120 \
-    bash "$WRAPPER" run --slug s9 --root "$root" --prompt-text "p" \
+    bash "$WRAPPER" run --slug s9 --root "$root" --prompt-file "$(pfile "$root/p" "p")" \
       --no-heartbeat --deadline-sec 60 >"$root/out.txt" 2>&1 &
   local wpid=$!
   sleep 3
@@ -365,7 +449,7 @@ t9() {
   timeout 30 bash "$WRAPPER" reconcile "$rd" >"$root/rec.txt" 2>&1
   local rc=$?
   assert_eq 1 "$rc" "T9a reconcile exit 1 (not a pass)"
-  assert_contains "$root/rec.txt" "is-our-process: yes" "T9a identity confirmed via pid+starttime"
+  assert_contains "$root/rec.txt" "is-our-process: yes" "T9a identity confirmed (pid+starttime+pgid+cmdline)"
   assert_contains "$root/rec.txt" "liveness is not progress" "T9a stale liveness not counted as progress"
   assert_eq "false" "$(jqf "$rd/status.json" .progress_confirmed)" "T9a progress_confirmed still false"
 
@@ -377,14 +461,14 @@ t9() {
 
   # (c) PID reuse: an innocent live process now holds the recorded PID (its starttime differs).
   #     Neither reconcile nor cleanup may touch it. Two fixtures, because reconcile rewrites state.
-  local victim_cmd='sleep 60'
-  bash -c "exec $victim_cmd" & local victim=$!
+  bash -c 'exec sleep 60' & local victim=$!
   sleep 0.3
 
   mk_reuse_fixture() {   # <dir> — records the victim's PID but a bogus starttime
     mkdir -p "$1"
     jq -n --argjson pid "$victim" '{run_id:"reused",slug:"s9",state:"MODEL_WAIT",pid:$pid,pgid:$pid,
-        start_ticks:999999999,started_at:"2026-01-01T00:00:00Z",deadline_at:"2026-01-01T00:15:00Z",
+        start_ticks:999999999,cmdline_marker:"/nonexistent/final.md",
+        started_at:"2026-01-01T00:00:00Z",deadline_at:"2026-01-01T00:15:00Z",
         exit_code:null,progress_confirmed:false,events_seen:0,tools_active:0,thread_id:null,
         elapsed_sec:0,message:"",cli_errors:[],wrapper_version:"2.0.0"}' > "$1/status.json"
   }
@@ -397,7 +481,7 @@ t9() {
   timeout 30 bash "$WRAPPER" cleanup "$root/reuse-b" --force >"$root/reuse-cln.txt" 2>&1
   local crc=$?
   assert_eq 1 "$crc" "T9c cleanup refuses to kill a reused PID"
-  assert_contains "$root/reuse-cln.txt" "REFUSING to kill" "T9c refusal is explicit"
+  assert_contains "$root/reuse-cln.txt" "REFUSING" "T9c refusal is explicit"
 
   if kill -0 "$victim" 2>/dev/null; then ok "T9c innocent PID-reuse victim ($victim) untouched"
   else bad "T9c the innocent process holding the reused PID was killed"; fi
@@ -405,9 +489,245 @@ t9() {
 }
 
 # ---------------------------------------------------------------------------
+# T10 — F1 (critical): a stored fail-class verdict must NEVER reconcile to success.
+#       The run itself returned 3; an orchestrator that later re-checks the same run dir with
+#       `reconcile` would have received 0 — turning REQUEST_CHANGES into a green gate.
+# ---------------------------------------------------------------------------
+t10() {
+  head_ T10 "reconcile is fail-closed: a stored fail-class verdict never reports success (F1)"
+  local root="$TMPROOT/t10"; mkdir -p "$root"; local rd
+
+  # (a) REQUEST_CHANGES: the run exits 3 …
+  CODEX_BIN="$FAKE" FAKE_MODE=normal \
+    FAKE_FINAL_TEXT='Findings below.
+
+```json
+{"verdict":"REQUEST_CHANGES","findings":[{"id":"F1","severity":"critical"}],"summary":"must not pass"}
+```' \
+    timeout 40 bash "$WRAPPER" run --slug r1 --root "$root" --mode exec \
+      --prompt-file "$(pfile "$root/p1" "p")" --no-heartbeat >"$root/a.txt" 2>&1
+  local rc=$?
+  rd="$(rundir "$root" r1)"
+  assert_eq 3 "$rc" "T10a run exits 3 on a fail-class verdict"
+  assert_eq "fail" "$(jqf "$rd/verdict.json" .verdict_class)" "T10a verdict stored as fail-class"
+
+  # … and reconcile on the SAME run dir must be non-zero too.
+  timeout 30 bash "$WRAPPER" reconcile "$rd" >"$root/rec1.txt" 2>&1
+  assert_eq 3 "$?" "T10a reconcile exits 3 on a stored REQUEST_CHANGES (never 0)"
+  assert_contains "$root/rec1.txt" "gate CLOSED" "T10a reconcile says the gate is CLOSED"
+
+  # (b) pass-class still reconciles to 0 — the gate is fail-CLOSED, not fail-ALWAYS.
+  CODEX_BIN="$FAKE" FAKE_MODE=normal \
+    timeout 40 bash "$WRAPPER" run --slug r2 --root "$root" --mode exec \
+      --prompt-file "$(pfile "$root/p2" "p")" --no-heartbeat >"$root/b.txt" 2>&1
+  rd="$(rundir "$root" r2)"
+  timeout 30 bash "$WRAPPER" reconcile "$rd" >"$root/rec2.txt" 2>&1
+  assert_eq 0 "$?" "T10b reconcile exits 0 on a stored APPROVE"
+
+  # (c) a run that never produced a valid verdict must reconcile to 1.
+  CODEX_BIN="$FAKE" FAKE_MODE=malformed \
+    timeout 40 bash "$WRAPPER" run --slug r3 --root "$root" --mode exec \
+      --prompt-file "$(pfile "$root/p3" "p")" --no-heartbeat >"$root/c.txt" 2>&1
+  rd="$(rundir "$root" r3)"
+  timeout 30 bash "$WRAPPER" reconcile "$rd" >"$root/rec3.txt" 2>&1
+  assert_eq 1 "$?" "T10c reconcile exits 1 on a run with no valid verdict"
+
+  # (d) TAMPERED/incomplete evidence: state says VERDICT_PARSED but verdict.json no longer
+  #     satisfies the contract, and final.md is gone so nothing can be re-derived. Trusting the
+  #     recorded state alone would open the gate on a file that nobody ever validated.
+  rd="$(rundir "$root" r2)"
+  printf '{"verdict":"APPROVE"}\n' > "$rd/verdict.json"
+  rm -f "$rd/final.md"
+  timeout 30 bash "$WRAPPER" reconcile "$rd" >"$root/rec4.txt" 2>&1
+  assert_eq 1 "$?" "T10d reconcile exits 1 when the stored verdict.json fails the contract"
+  assert_absent "$rd/verdict.json" "T10d the invalid verdict.json is removed, not left to be misread"
+}
+
+# ---------------------------------------------------------------------------
+# T11 — F6: the prompt never reaches argv, and run artifacts are not world-readable.
+# ---------------------------------------------------------------------------
+t11() {
+  head_ T11 "prompt never lands in argv; run dir 0700 and artifacts 0600 (F6/AC12)"
+  local root="$TMPROOT/t11"; mkdir -p "$root"
+  local sentinel="SENTINEL-e7f1c0-unreleased-review-text"
+
+  # (a) --prompt-text is GONE: it put the entire prompt into the wrapper's own argv, where any
+  #     user on the box can read it out of /proc/<pid>/cmdline.
+  timeout 20 bash "$WRAPPER" run --slug p1 --root "$root" --prompt-text "$sentinel" >"$root/pt.txt" 2>&1
+  assert_eq 2 "$?" "T11a --prompt-text is rejected as a usage error"
+  assert_contains "$root/pt.txt" "--prompt-file" "T11a the error points at the safe alternative"
+
+  # (b) run a review whose prompt holds the sentinel and, WHILE IT IS IN FLIGHT, read the real
+  #     /proc cmdline of both the wrapper and the codex child. Neither may carry the prompt.
+  local pf; pf="$(pfile "$root/p2" "$sentinel")"
+  CODEX_BIN="$FAKE" FAKE_MODE=hang FAKE_HANG_SEC=30 \
+    bash "$WRAPPER" run --slug p2 --root "$root" --mode exec --prompt-file "$pf" \
+      --no-heartbeat --deadline-sec 4 --grace-sec 1 >"$root/out.txt" 2>&1 &
+  local wpid=$!
+  local rd="" i=0
+  while [ "$i" -lt 80 ] && [ -z "$rd" ]; do sleep 0.1; rd="$(rundir "$root" p2)"; i=$((i+1)); done
+  i=0; while [ "$i" -lt 80 ] && [ ! -s "$rd/pid" ]; do sleep 0.1; i=$((i+1)); done
+  local child; child="$(cat "$rd/pid" 2>/dev/null)"
+
+  case "$(cmdline_of "$wpid")" in
+    *"$sentinel"*) bad "T11b the prompt LEAKED into the wrapper's own argv" ;;
+    *)             ok  "T11b prompt absent from /proc/<wrapper>/cmdline" ;;
+  esac
+  case "$(cmdline_of "$child")" in
+    *"$sentinel"*) bad "T11b the prompt LEAKED into the codex child's argv" ;;
+    *)             ok  "T11b prompt absent from /proc/<codex-child>/cmdline" ;;
+  esac
+  wait "$wpid" 2>/dev/null
+
+  # (c) permissions — a review dir holds the prompt, the full transcript and the findings.
+  assert_eq "700" "$(stat -c %a "$rd")"              "T11c run dir is 0700"
+  assert_eq "600" "$(stat -c %a "$rd/prompt.md")"    "T11c prompt.md is 0600"
+  assert_eq "600" "$(stat -c %a "$rd/status.json")"  "T11c status.json is 0600"
+  assert_eq "600" "$(stat -c %a "$rd/events.jsonl")" "T11c events.jsonl is 0600"
+
+  # (d) the artifacts codex itself writes inherit the same umask
+  CODEX_BIN="$FAKE" FAKE_MODE=normal \
+    timeout 40 bash "$WRAPPER" run --slug p3 --root "$root" --mode exec \
+      --prompt-file "$(pfile "$root/p3" "p")" --no-heartbeat >"$root/n.txt" 2>&1
+  rd="$(rundir "$root" p3)"
+  assert_eq "600" "$(stat -c %a "$rd/final.md")"    "T11d final.md (the whole review) is 0600"
+  assert_eq "600" "$(stat -c %a "$rd/verdict.json")" "T11d verdict.json is 0600"
+}
+
+# ---------------------------------------------------------------------------
+# T12 — F4: cleanup must verify that the recorded GROUP really is this run's before it SIGKILLs
+#       the group. (pid, starttime) only says "a process with this pid started at this instant".
+# ---------------------------------------------------------------------------
+t12() {
+  head_ T12 "cleanup refuses to signal a process group it cannot tie to the run (F4)"
+  local root="$TMPROOT/t12"; mkdir -p "$root"
+
+  # A live process leading its OWN group, whose cmdline even LOOKS like a codex run — but points
+  # at a different run dir. `set -m` gives it its own pgid, exactly like the wrapper's child, so a
+  # wrong group-kill hits only this victim and not the test harness.
+  set -m
+  bash -c 'exec -a "codex exec --json -o /somewhere/else/final.md -m gpt-5.6-sol -" sleep 60' &
+  local victim=$!
+  set +m
+  sleep 0.3
+
+  local vstart vpgid
+  vstart="$(awk '{sub(/.*\) /,""); print $20}' "/proc/$victim/stat" 2>/dev/null)"
+  vpgid="$(awk '{sub(/.*\) /,""); print $3}'  "/proc/$victim/stat" 2>/dev/null)"
+  if [ "$vpgid" = "$victim" ]; then ok "T12 victim leads its own group (fixture mirrors a real run)"
+  else bad "T12 fixture broken: victim is not a group leader ($vpgid != $victim)"; fi
+
+  # pid, starttime AND pgid all genuinely match the live victim. The ONLY thing that does not is
+  # the run's identity — this run's unique output path is nowhere in that process's argv.
+  mk_fixture() {   # <dir>
+    mkdir -p "$1"
+    jq -n --argjson pid "$victim" --argjson pgid "$vpgid" --argjson st "$vstart" --arg m "$1/final.md" \
+      '{run_id:"foreign",slug:"t12",state:"MODEL_WAIT",pid:$pid,pgid:$pgid,start_ticks:$st,
+        cmdline_marker:$m,started_at:"2026-01-01T00:00:00Z",deadline_at:"2026-01-01T00:15:00Z",
+        exit_code:null,progress_confirmed:false,events_seen:0,tools_active:0,thread_id:null,
+        elapsed_sec:0,message:"",cli_errors:[],orphans_left:0,wrapper_version:"2.0.0"}' > "$1/status.json"
+  }
+
+  mk_fixture "$root/foreign"
+  timeout 30 bash "$WRAPPER" cleanup "$root/foreign" --force >"$root/f.txt" 2>&1
+  assert_eq 1 "$?" "T12 cleanup refuses a group it cannot tie to this run"
+  assert_contains "$root/f.txt" "REFUSING" "T12 the refusal is explicit"
+  sleep 0.5
+  if kill -0 "$victim" 2>/dev/null; then ok "T12 the unverified process group was NOT signalled"
+  else bad "T12 cleanup SIGKILLed a whole process group it never verified"; fi
+
+  # a recorded pgid that does not match the live process's real pgid is also disqualifying
+  mk_fixture "$root/badpgid"
+  jq '.pgid = (.pgid + 1)' "$root/badpgid/status.json" > "$root/badpgid/s.tmp" \
+    && mv "$root/badpgid/s.tmp" "$root/badpgid/status.json"
+  timeout 30 bash "$WRAPPER" cleanup "$root/badpgid" --force >"$root/g.txt" 2>&1
+  assert_eq 1 "$?" "T12 cleanup refuses when the recorded pgid != the process's real pgid"
+  if kill -0 "$victim" 2>/dev/null; then ok "T12 victim still untouched after the pgid-mismatch refusal"
+  else bad "T12 victim killed on a pgid mismatch"; fi
+
+  kill -KILL "$victim" 2>/dev/null; wait "$victim" 2>/dev/null
+}
+
+# ---------------------------------------------------------------------------
+# T13 — F5: recovery is not allowed to destroy the evidence it is recovering from.
+# ---------------------------------------------------------------------------
+t13() {
+  head_ T13 "reconcile/cleanup preserve events.jsonl and the recorded evidence (F5)"
+  local root="$TMPROOT/t13"; mkdir -p "$root"
+
+  CODEX_BIN="$FAKE" FAKE_MODE=hang FAKE_HANG_SEC=120 \
+    bash "$WRAPPER" run --slug s13 --root "$root" --mode exec \
+      --prompt-file "$(pfile "$root/p" "p")" --no-heartbeat --deadline-sec 60 >"$root/out.txt" 2>&1 &
+  local wpid=$!
+  sleep 3
+  kill -KILL "$wpid" 2>/dev/null; wait "$wpid" 2>/dev/null   # wrapper dies; child lives on
+
+  local rd; rd="$(rundir "$root" s13)"
+  local md5_before ev_before thread_before pgid
+  md5_before="$(md5 "$rd/events.jsonl")"
+  ev_before="$(jqf "$rd/status.json" .events_seen)"
+  thread_before="$(jqf "$rd/status.json" .thread_id)"
+  pgid="$(jqf "$rd/status.json" .pgid)"
+  assert_eq "3" "$ev_before" "T13 baseline: 3 events were recorded before the crash"
+
+  timeout 30 bash "$WRAPPER" reconcile "$rd" >"$root/rec.txt" 2>&1
+  assert_eq "$md5_before" "$(md5 "$rd/events.jsonl")" "T13 reconcile leaves events.jsonl byte-identical (append-only evidence)"
+  assert_eq "$ev_before"     "$(jqf "$rd/status.json" .events_seen)" "T13 reconcile keeps events_seen"
+  assert_eq "$thread_before" "$(jqf "$rd/status.json" .thread_id)"   "T13 reconcile keeps thread_id"
+  if [ "$(jqf "$rd/status.json" .last_event_at)" = "null" ]; then
+    bad "T13 reconcile erased last_event_at — the status no longer describes the real stream"
+  else
+    ok "T13 reconcile keeps last_event_at"
+  fi
+
+  timeout 30 bash "$WRAPPER" cleanup "$rd" --force >"$root/cln.txt" 2>&1
+  assert_eq "$md5_before" "$(md5 "$rd/events.jsonl")" "T13 cleanup leaves events.jsonl byte-identical"
+  assert_eq "$ev_before"     "$(jqf "$rd/status.json" .events_seen)" "T13 cleanup keeps events_seen"
+  assert_eq "$thread_before" "$(jqf "$rd/status.json" .thread_id)"   "T13 cleanup keeps thread_id"
+  # `wait` on a process that is NOT our child returns 127. Recording that as the review's exit
+  # code invents a CLI failure that never happened.
+  assert_eq "null" "$(jqf "$rd/status.json" .exit_code)" "T13 cleanup does not invent an exit code (no 127)"
+  assert_file "$rd/recovery.log" "T13 recovery actions are appended to recovery.log, not into the event stream"
+  sleep 1
+  assert_eq "0" "$(group_count "$pgid")" "T13 cleanup still reaped the whole group"
+}
+
+# ---------------------------------------------------------------------------
+# T14 — AC14: the rollback flag drops the state machine, never the fail-closed gate.
+# ---------------------------------------------------------------------------
+t14() {
+  head_ T14 "rollback flag CODEX_REVIEW_WRAPPER_V2=0 is still fail-closed (AC14)"
+  local root="$TMPROOT/t14"; mkdir -p "$root"; local rd
+
+  CODEX_REVIEW_WRAPPER_V2=0 CODEX_BIN="$FAKE" FAKE_MODE=normal \
+    timeout 40 bash "$WRAPPER" run --slug f1 --root "$root" --mode exec \
+      --prompt-file "$(pfile "$root/p1" "p")" >"$root/a.txt" 2>&1
+  assert_eq 0 "$?" "T14 fallback: pass-class verdict -> exit 0"
+  rd="$(rundir "$root" f1)"
+  assert_eq "APPROVE" "$(jqf "$rd/verdict.json" .verdict)" "T14 fallback still takes the LAST fence"
+
+  CODEX_REVIEW_WRAPPER_V2=0 CODEX_BIN="$FAKE" FAKE_MODE=normal \
+    FAKE_FINAL_TEXT='x
+
+```json
+{"verdict":"REQUEST_CHANGES","findings":[],"summary":"no"}
+```' \
+    timeout 40 bash "$WRAPPER" run --slug f2 --root "$root" --mode exec \
+      --prompt-file "$(pfile "$root/p2" "p")" >"$root/b.txt" 2>&1
+  assert_eq 3 "$?" "T14 fallback: fail-class verdict -> exit 3"
+
+  CODEX_REVIEW_WRAPPER_V2=0 CODEX_BIN="$FAKE" FAKE_MODE=truncated \
+    timeout 40 bash "$WRAPPER" run --slug f3 --root "$root" --mode exec \
+      --prompt-file "$(pfile "$root/p3" "p")" >"$root/c.txt" 2>&1
+  assert_eq 1 "$?" "T14 fallback: truncated final fence -> exit 1 (no fallback to an earlier fence)"
+  rd="$(rundir "$root" f3)"
+  assert_absent "$rd/verdict.json" "T14 fallback writes no verdict.json for a bad final message"
+}
+
+# ---------------------------------------------------------------------------
 run_all() {
   local t
-  for t in 1 2 3 4 5 6 7 8 9; do
+  for t in 1 2 3 4 5 6 7 8 9 10 11 12 13 14; do
     if want "$t" && declare -F "t$t" >/dev/null; then "t$t"; fi
   done
 }

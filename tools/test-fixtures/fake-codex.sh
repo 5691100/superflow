@@ -16,7 +16,14 @@
 # Behaviour is selected via FAKE_MODE. The stub reads the prompt from stdin (never argv),
 # and honours `-o/--output-last-message <FILE>` exactly like the real CLI.
 #
-# Modes: normal | tools | silent | hang | malformed | badverdict | failfast | noverdict
+# Modes:
+#   normal | tools | silent | hang | failfast                    — process/stream behaviour
+#   malformed | badverdict | noverdict                           — bad final message
+#   trailingbad | truncated | partial                            — fail-OPEN traps for the extractor
+#
+# The three traps all plant an EARLIER, perfectly valid APPROVE fence and then ruin the final one.
+# Any extractor that "scans backwards for the last block that parses", or that defaults away a
+# missing schema key, will happily open the gate on all three. They must all be rejected.
 
 set -u
 
@@ -80,9 +87,13 @@ if [ "$FAKE_MODE" = "hang" ]; then
   # Deliberately outlive the deadline, AND spawn grandchildren in the same process group so the
   # test can prove the wrapper reaps the whole GROUP (no orphans), not just the direct child.
   sleep "${FAKE_HANG_SEC:-600}" &
-  # A TERM-RESISTANT descendant: ignores SIGTERM, so the wrapper must escalate to SIGKILL on the
-  # whole group. (Real-world analogue: a `node`/`codex` child that traps TERM and lingers.)
+  # A TERM-RESISTANT descendant: `trap "" TERM` sets SIGTERM to SIG_IGN, which SURVIVES execve —
+  # so this process ignores the TERM that kills its parent. An escalation that sends SIGKILL only
+  # while the LEADER is still alive skips it entirely and leaves a real orphan behind. Its pid is
+  # published so the test can assert it actually died. (Real-world analogue: a node/codex child
+  # that traps TERM and lingers.)
   bash -c 'trap "" TERM; sleep '"${FAKE_HANG_SEC:-600}" &
+  [ -n "${FAKE_GRANDCHILD_OUT:-}" ] && printf '%s\n' "$!" > "$FAKE_GRANDCHILD_OUT"
   sleep "${FAKE_HANG_SEC:-600}"
   exit 0
 fi
@@ -131,6 +142,22 @@ case "$FAKE_MODE" in
 ```json
 {"verdict": "APPROVE", "findings": [ ,
 ```'
+    ;;
+  truncated)
+    # A VALID verdict fence followed by a TRUNCATED one: the final fence is OPENED and never
+    # closed — exactly what a killed, rate-limited or context-exhausted model leaves behind.
+    # A regex that only matches complete ```…``` PAIRS cannot see this block at all, so it hands
+    # back the previous (APPROVE) fence and opens the gate on an answer that was never finished.
+    FINAL='Review done.
+
+```json
+{"verdict":"APPROVE","findings":[],"summary":"earlier valid block"}
+```
+
+Final verdict:
+
+```json
+{"verdict":"REQUEST_CHANGES","findings":[{"id":"F1"}],"summary":"cut off mid-'
     ;;
   partial)
     # Parses, verdict is in the enum, but `findings` and `summary` are MISSING.
