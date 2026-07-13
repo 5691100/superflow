@@ -179,20 +179,51 @@ verdict_class_of() {
 }
 
 # ---------------------------------------------------------------------------
-# Terminal failure, replayed from the APPEND-ONLY event stream rather than from a status field that
-# a wrapper killed mid-drain never got to write (r2 F10).
+# Terminal failure + evidence integrity, replayed from the APPEND-ONLY event stream rather than from
+# a status field that a wrapper killed mid-drain never got to write (r2 F10).
 #
-# An `error` ITEM ({"type":"item.completed","item":{"type":"error"}}) is deliberately NOT a failure:
-# the real CLI emits one (a config deprecation notice) on fully successful exit-0 runs, and T8 pins
-# that. Only a TOP-LEVEL error event or a turn.failed says the turn itself did not succeed — the
-# anchor is what keeps the two apart. Over-matching here would only ever CLOSE the gate.
+# STRUCTURAL, never lexical (r3). This used to grep the raw text with an anchored regex, which meant
+# the failure detection depended on the CLI's FIELD ORDER: `{"type":"error",...}` was caught but the
+# equally valid `{"message":"…","type":"error"}` sailed straight through and a failed run got mined
+# as a pass. JSON has no field order, so nothing may be inferred from one. Every record is parsed:
+#
+#   - a record that does not parse as a JSON object is CORRUPT. For a FINISHED run that is fatal:
+#     truncated evidence cannot prove a successful run, so it fails closed. (Mid-stream partial
+#     lines are a different thing entirely — a live writer between two write()s — and are handled by
+#     the CARRY mechanism in drain_events; this scan only ever runs on a finished run.)
+#   - a TOP-LEVEL type/kind of "error" or "turn.failed" is a terminal failure, in any field order.
+#   - a nested error ITEM ({"type":"item.completed","item":{"type":"error"}}) is NOT a failure: the
+#     real CLI emits one (a config deprecation notice) on fully successful exit-0 runs, and T8/T19c
+#     pin that. The distinction is structural — top-level `.type` vs `.item.type` — not textual.
+#
+# Echoes nothing; sets EVENTS_SCAN_ERROR and returns 1 on corrupt or failed evidence.
 # ---------------------------------------------------------------------------
-events_show_failure() {
-  local f="$RUN_DIR/events.jsonl"
-  [ -s "$f" ] || return 1
-  grep -qE '"type"[[:space:]]*:[[:space:]]*"turn\.failed"' "$f" && return 0
-  grep -qE '^[[:space:]]*\{[[:space:]]*"type"[[:space:]]*:[[:space:]]*"error"' "$f" && return 0
-  return 1
+events_scan() {
+  EVENTS_SCAN_ERROR=""
+  local f="$RUN_DIR/events.jsonl" out
+  [ -s "$f" ] || return 0   # no events at all proves nothing either way; exit_code carries that
+
+  out="$(jq -Rr '
+    select(test("\\S"))                                   # blank lines are not records
+    | (try fromjson catch null) as $e
+    | if ($e | type) != "object" then "corrupt"
+      else (($e.type // $e.kind // "") | tostring | ascii_downcase) as $t
+        | if ($t == "turn.failed") or ($t == "error") then "failed" else "ok" end
+      end' "$f" 2>/dev/null)"
+
+  if [ -z "$out" ] && [ -s "$f" ]; then
+    EVENTS_SCAN_ERROR="events.jsonl could not be parsed at all — corrupt evidence cannot prove a successful run"
+    return 1
+  fi
+  if grep -qx failed <<<"$out"; then
+    EVENTS_SCAN_ERROR="events.jsonl records a terminal failure — a top-level error event or a failed turn — so the run did not succeed"
+    return 1
+  fi
+  if grep -qx corrupt <<<"$out"; then
+    EVENTS_SCAN_ERROR="events.jsonl contains a malformed/truncated record — corrupt evidence cannot prove a successful run"
+    return 1
+  fi
+  return 0
 }
 
 # ---------------------------------------------------------------------------
@@ -208,8 +239,9 @@ events_show_failure() {
 #      OUTRANKS any stored verdict, so it is checked BEFORE the verdict is even looked at (F11).
 #   2. the provider's exit code was actually RECORDED, and it is 0. `null` means nobody ever saw
 #      the process exit — that is the ABSENCE of proof, not proof of success (F9/F10).
-#   3. the event stream shows no failed turn — replayed from events.jsonl, not from status.json,
-#      because a crashed wrapper never wrote it there (F10).
+#   3. the event stream is intact and shows no failed turn — parsed STRUCTURALLY out of the
+#      append-only events.jsonl, not read off status.json (a crashed wrapper never wrote it there,
+#      F10) and not grepped for (field order is not evidence, r3).
 #   4. final.md exists, is non-empty, and was not written BEFORE the run started — a leftover or
 #      injected final message from another run is not this run's answer (F10).
 #
@@ -230,8 +262,8 @@ verify_provenance() {
     PROVENANCE_ERROR="provider exited with code $EXIT_CODE — a failed run cannot yield a usable verdict"
     return 1
   fi
-  if events_show_failure; then
-    PROVENANCE_ERROR="events.jsonl records a failed turn — the review turn did not succeed"
+  if ! events_scan; then
+    PROVENANCE_ERROR="$EVENTS_SCAN_ERROR"
     return 1
   fi
   if [ ! -s "$RUN_DIR/final.md" ]; then

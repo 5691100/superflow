@@ -18,6 +18,7 @@
 #   16 a nonzero provider exit can never yield a usable verdict            (r2 #2)
 #   17 crash recovery demands proof of success, not absence of bad news    (r2 #3)
 #   18 terminal state + provenance outrank a stored pass verdict           (r2 #4)
+#   19 events.jsonl is parsed structurally, not grepped; corrupt = closed  (r3)
 #
 # Hermetic: never invokes the real `codex` CLI or the network. All runs use
 # tools/test-fixtures/fake-codex.sh, which replays the real 0.144.1 JSONL grammar.
@@ -920,9 +921,63 @@ t18() {
 }
 
 # ---------------------------------------------------------------------------
+# T19 — r3: the event stream must be read STRUCTURALLY. It used to be grepped, so terminal-failure
+#       detection depended on the CLI's field ORDER — and JSON has no field order. A valid
+#       {"message":"…","type":"error"} was invisible, and a truncated record was silently accepted.
+#       Both controls matter as much as the two traps: this must fail CLOSED, not fail PARANOID.
+# ---------------------------------------------------------------------------
+t19() {
+  head_ T19 "events.jsonl is parsed, not grepped: order-independent failure, corrupt = closed (r3)"
+  local root="$TMPROOT/t19"; mkdir -p "$root"; local rd
+
+  # (a) TRAP: a top-level error event whose fields arrive in a DIFFERENT ORDER. Byte-for-byte this
+  #     is the same event; only the serialisation differs. The old anchored regex missed it, so
+  #     reconcile mined the APPROVE, returned 0 and set VERDICT_PARSED.
+  mk_evidence_fixture "$root/reordered" COMPLETED 0
+  printf '%s\n' '{"message":"provider terminal failure","type":"error"}' >> "$root/reordered/events.jsonl"
+  timeout 30 bash "$WRAPPER" reconcile "$root/reordered" >"$root/a.txt" 2>&1
+  assert_eq 1 "$?" "T19a top-level error with reversed field order -> exit 1 (order is not evidence)"
+  assert_absent "$root/reordered/verdict.json" "T19a no verdict mined from a failed run"
+  assert_contains "$root/a.txt" "terminal failure" "T19a the refusal names the terminal failure"
+
+  # (b) TRAP: a truncated JSONL record in a FINISHED run. Evidence that cannot be parsed cannot
+  #     prove anything — least of all a success.
+  mk_evidence_fixture "$root/corrupt" COMPLETED 0
+  printf '%s' '{"type":"item.completed","item":{"id":"item_9","type":"comm' >> "$root/corrupt/events.jsonl"
+  timeout 30 bash "$WRAPPER" reconcile "$root/corrupt" >"$root/b.txt" 2>&1
+  assert_eq 1 "$?" "T19b corrupt/truncated record in a finished run -> exit 1"
+  assert_absent "$root/corrupt/verdict.json" "T19b no verdict mined from corrupt evidence"
+  assert_contains "$root/b.txt" "malformed/truncated" "T19b the refusal names the corrupt record"
+
+  # (c) CONTROL: a NESTED error item is the config-deprecation notice the real CLI emits on
+  #     successful exit-0 runs. Structurally it is item.completed, not an error event. Closing the
+  #     gate on it would false-fail every real review.
+  mk_evidence_fixture "$root/nested" COMPLETED 0
+  printf '%s\n' '{"type":"item.completed","item":{"id":"item_0","type":"error","message":"`[features].codex_hooks` is deprecated."}}' \
+    >> "$root/nested/events.jsonl"
+  timeout 30 bash "$WRAPPER" reconcile "$root/nested" >"$root/c.txt" 2>&1
+  assert_eq 0 "$?" "T19c nested error ITEM + exit 0 + valid verdict -> still exit 0 (no false closure)"
+  assert_eq "APPROVE" "$(jqf "$root/nested/verdict.json" .verdict)" "T19c the APPROVE still stands"
+
+  # (d) CONTROL: a LIVE run whose writer is caught mid-line. A partial trailing line is normal
+  #     streaming, not corruption — the drain must carry it over and the run must complete.
+  CODEX_BIN="$FAKE" FAKE_MODE=partialline FAKE_TOOL_SEC=3 \
+    timeout 40 bash "$WRAPPER" run --slug live --root "$root" --mode exec \
+      --prompt-file "$(pfile "$root/p" "p")" --no-heartbeat --deadline-sec 25 >"$root/d.txt" 2>&1
+  assert_eq 0 "$?" "T19d a partial line mid-stream is NOT corruption — the live run still passes"
+  rd="$(rundir "$root" live)"
+  assert_eq "VERDICT_PARSED" "$(state "$rd")" "T19d terminal state"
+  # the fragment was reassembled: every line of the finished stream parses, and the split event was
+  # counted exactly once (a broken CARRY would have counted the fragment and its tail separately)
+  if jq -e . "$rd/events.jsonl" >/dev/null 2>&1; then ok "T19d the finished stream is valid JSONL"
+  else bad "T19d the finished stream did not reassemble into valid JSONL"; fi
+  assert_eq "6" "$(jqf "$rd/status.json" .events_seen)" "T19d the split event was counted once, not twice"
+}
+
+# ---------------------------------------------------------------------------
 run_all() {
   local t
-  for t in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18; do
+  for t in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19; do
     if want "$t" && declare -F "t$t" >/dev/null; then "t$t"; fi
   done
 }

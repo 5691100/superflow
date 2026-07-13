@@ -102,6 +102,18 @@ if [ "$FAKE_MODE" = "hang" ]; then
   exit 0
 fi
 
+if [ "$FAKE_MODE" = "partialline" ]; then
+  # A HALF-WRITTEN event line — the writer caught between two write() calls, which is what any
+  # reader of a live stream sees constantly. The wrapper's incremental drain must CARRY the
+  # fragment over to the next read, not mistake it for corruption. (Corrupt-record detection is
+  # for FINISHED runs; a live partial tail is normal streaming, and T19d pins the difference.)
+  # The pause is longer than the poll interval, so the drain loop is guaranteed to read the
+  # fragment while it is still incomplete.
+  printf '{"type":"item.completed","item":{"id":"item_1","type":"command_exec'
+  sleep "${FAKE_TOOL_SEC:-3}"
+  printf 'ution","command":"ls","status":"completed","exit_code":0,"aggregated_output":"ok"}}\n'
+fi
+
 if [ "$FAKE_MODE" = "tools" ] || [ "$FAKE_MODE" = "normal" ]; then
   emit '{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/bash -lc '"'"'ls tools/'"'"'","status":"in_progress","exit_code":null,"aggregated_output":""}}'
   sleep "${FAKE_TOOL_SEC:-0}"
